@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ollama Cloud CLI - Cntx Code</title>
+    <meta name="description" content="Use Ollama Cloud and subscription models from Cntx Code with local API key storage." />
+    <link rel="canonical" href="https://cntxcode.com/ollama-cloud" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/"><img src="../main/logo/logo1.png" alt="" /><span>Cntx Code</span></a>
+      <nav><a href="/">Home</a><a href="byok.html">BYOK</a><a href="token-efficient.html">Token Efficient</a></nav>
+    </header>
+    <main>
+      <section class="section">
+        <p class="eyebrow">Ollama Cloud</p>
+        <h1>Use Ollama Cloud from a coding CLI.</h1>
+        <p class="hero-text">Cntx supports Ollama Cloud endpoints, stores keys locally, and can mark an endpoint for subscription-model workflows.</p>
+        <div class="steps">
+          <button type="button" data-copy="cntx init --provider ollama-cloud --name ollama-pro">cntx init --provider ollama-cloud --name ollama-pro</button>
+          <button type="button" data-copy="cntx api-key add --provider ollama-cloud">cntx api-key add --provider ollama-cloud</button>
+          <button type="button" data-copy="cntx --endpoint ollama-pro &quot;review this module&quot;">cntx --endpoint ollama-pro "review this module"</button>
+        </div>
+      </section>
+    </main>
+    <script src="script.js"></script>
+  </body>
+</html>

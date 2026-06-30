@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Token-Efficient AI Coding CLI - Cntx Code</title>
+    <meta name="description" content="Cntx Code optimizes prompts, previews token counts, and routes work by prompt size." />
+    <link rel="canonical" href="https://cntxcode.com/token-efficient" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/"><img src="../main/logo/logo1.png" alt="" /><span>Cntx Code</span></a>
+      <nav><a href="/">Home</a><a href="byok.html">BYOK</a><a href="claude-code-alternative.html">Alternative</a></nav>
+    </header>
+    <main>
+      <section class="section">
+        <p class="eyebrow">Token efficiency</p>
+        <h1>Spend fewer tokens on repeated coding work.</h1>
+        <p class="hero-text">Run <code>cntx bench</code> before a model call to see optimized characters, estimated input tokens, duplicate lines removed, routed model, and a rough cost preview.</p>
+        <div class="terminal-shell">
+          <div class="terminal-bar"><span></span><span></span><span></span><strong>cntx bench</strong></div>
+          <pre><code>$ cntx bench "review this diff and keep the patch small"
+benchmark
+  original chars: 45
+  optimized chars: 45
+  estimated input tokens: 12
+  routed model: &lt;auto&gt;</code></pre>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
