@@ -49,6 +49,7 @@ Implemented systems:
 - built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
 - permission modes
 - docs and tests
+- packaged interactive docs browser via `cntx --docs`
 
 ## Providers
 
@@ -165,6 +166,21 @@ cntx config path
 cntx config show
 cntx doctor
 ```
+
+## Packaged Docs Browser
+
+The published crate now includes the public README, docs directory, changelog,
+license, and `EXPLAIN.md`. `EXPLAIN.md` was removed from the package exclusion list
+so the explanation can ship with the crate.
+
+Users can open an interactive terminal docs browser with:
+
+```bash
+cntx --docs
+```
+
+The browser renders markdown pages from compile-time embedded docs, so it works
+after `cargo install cntx` without needing source files beside the binary.
 
 ## Sessions
 

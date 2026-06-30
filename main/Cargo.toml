@@ -1,6 +1,6 @@
 [package]
 name = "cntx"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Cntx Code: BYOK, token-efficient AI coding assistant with built-in doc search and token saving"
 license = "MIT"
@@ -15,7 +15,6 @@ categories = ["command-line-utilities", "development-tools"]
 # gitignored runtime file and are never part of the source tree.
 exclude = [
     "AGENTS.md",
-    "EXPLAIN.md",
     "HELP.md",
     "MONETIZATION.md",
     "ROADMAP.md",
@@ -34,6 +33,7 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
 dirs = "6"
 futures-util = "0.3"
 indicatif = "0.18"

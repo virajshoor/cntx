@@ -5,6 +5,19 @@ adapter family for a specific gateway. They are not new adapter implementations;
 they tell Cntx Code how to reuse the OpenAI-compatible, Anthropic, or Ollama
 adapter for a particular endpoint.
 
+## Built-In Gallery
+
+```bash
+cntx provider gallery
+cntx provider install-preset openrouter
+cntx provider use openrouter
+```
+
+The gallery currently includes OpenRouter, Groq, Together, and Fireworks presets.
+Presets configure the base URL, API key environment variable, adapter family, and a
+reasonable default model. You can edit the generated config later with
+`cntx config show` and `cntx provider add`.
+
 ## Add A Preset From Flags
 
 ```bash

@@ -1,19 +1,23 @@
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use clap::CommandFactory;
+use clap_complete::generate;
 use owo_colors::OwoColorize;
 use rustyline::DefaultEditor;
 
 use crate::api_keys;
 use crate::cli::{
-    ApiKeyCommand, Cli, Command, ConfigCommand, EndpointArgs, McpCommand, ModelCommand,
-    ProviderCommand, SessionCommand, SkillCommand,
+    ApiKeyCommand, Cli, Command, ConfigCommand, EndpointArgs, InitArgs, McpCommand, MemoryCommand,
+    ModelCommand, ProviderCommand, SessionCommand, SkillCommand,
 };
 use crate::config::{
     load_custom_provider_import, load_endpoint_import, load_mcp_server_import, AppConfig,
-    ConfigStore, CustomProvider, EndpointConfig, McpServerConfig, ModelAlias, ProviderKind,
+    ConfigStore, CustomProvider, CustomProviderKind, EndpointConfig, McpServerConfig, ModelAlias,
+    ProviderKind,
 };
 use crate::counsel::{build_evaluation_prompt, build_worker_prompt, plan_counsel, CounselPlan};
 use crate::errors::CntxError;
@@ -36,6 +40,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     api_keys::ensure_secrets_file(&store)?;
     let mut config = store.load()?;
 
+    if cli.docs {
+        return handle_docs();
+    }
+
     if cli.refresh_models {
         let report = refresh_with_spinner(&config, &store).await?;
         ui::print_refresh_report(&report);
@@ -47,12 +55,22 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Model(command)) => handle_model(command, &store, &mut config).await,
         Some(Command::Provider(command)) => handle_provider(command, &store, &mut config),
         Some(Command::ApiKey(command)) => handle_api_key(command, &store),
+        Some(Command::Init(args)) => handle_init(args, &store, &mut config),
+        Some(Command::Bench { ref prompt }) => handle_bench(&cli, &store, &config, prompt),
+        Some(Command::Demo) => handle_demo(),
+        Some(Command::Completions { shell }) => {
+            let mut command = Cli::command();
+            let bin_name = command.get_name().to_string();
+            generate(shell, &mut command, bin_name, &mut io::stdout());
+            Ok(())
+        }
+        Some(Command::Memory(command)) => handle_memory(command),
         Some(Command::Mcp(command)) => handle_mcp(command, &store, &mut config).await,
         Some(Command::Config(command)) => handle_config(command, &store, &config),
         Some(Command::Session(command)) => handle_session(command, &store),
         Some(Command::Skill(command)) => handle_skill(command, &store),
         Some(Command::Sandbox { yaml }) => handle_sandbox(&cli, &config, yaml),
-        Some(Command::Doctor) => handle_doctor(&store, &config),
+        Some(Command::Doctor { fix }) => handle_doctor(&store, &mut config, fix),
         None => {
             let prompt = cli.prompt.join(" ");
             let sandbox = build_sandbox(&cli);
@@ -125,17 +143,15 @@ impl Runtime {
             self.resolve_model(&endpoint_name, &endpoint, optimized.report.estimated_tokens)?;
 
         let mode_label = if self.apply { "apply" } else { "auto" };
-        println!(
-            "{} endpoint={} model={} mode={} tokens={} saved={} chars",
-            "->".cyan(),
-            endpoint_name,
-            model,
+        print_prompt_preview(
+            &endpoint_name,
+            &model,
             mode_label,
             optimized.report.estimated_tokens,
             optimized
                 .report
                 .original_chars
-                .saturating_sub(optimized.report.optimized_chars)
+                .saturating_sub(optimized.report.optimized_chars),
         );
 
         let mut messages = Vec::new();
@@ -211,18 +227,21 @@ impl Runtime {
             .resolve_model_override()
             .unwrap_or_else(|| plan.worker_model.clone());
 
-        println!(
-            "{} mode=counsel endpoint={} evaluator={} worker={} task={} tokens={} saved={} chars",
-            "->".cyan(),
+        print_prompt_preview(
             endpoint_name,
-            plan.evaluator_model,
-            worker_model,
-            plan.task.as_str(),
+            &worker_model,
+            "counsel",
             optimized.report.estimated_tokens,
             optimized
                 .report
                 .original_chars
-                .saturating_sub(optimized.report.optimized_chars)
+                .saturating_sub(optimized.report.optimized_chars),
+        );
+        println!(
+            "{} evaluator={} task={}",
+            "->".cyan(),
+            plan.evaluator_model,
+            plan.task.as_str()
         );
 
         self.session.push("user", prompt);
@@ -417,6 +436,113 @@ async fn collect_chat(
     Ok(text)
 }
 
+fn print_prompt_preview(
+    endpoint_name: &str,
+    model: &str,
+    mode_label: &str,
+    estimated_tokens: usize,
+    saved_chars: usize,
+) {
+    let cost = rough_cost_usd(model, estimated_tokens, 4096)
+        .map(|value| format!(" cost~=${value:.4}"))
+        .unwrap_or_default();
+    println!(
+        "{} endpoint={} model={} mode={} tokens={} saved={} chars{}",
+        "->".cyan(),
+        endpoint_name,
+        model,
+        mode_label,
+        estimated_tokens,
+        saved_chars,
+        cost
+    );
+}
+
+struct DocPage {
+    title: &'static str,
+    body: &'static str,
+}
+
+const DOC_PAGES: &[DocPage] = &[
+    DocPage {
+        title: "README",
+        body: include_str!("../README.md"),
+    },
+    DocPage {
+        title: "Explanation",
+        body: include_str!("../EXPLAIN.md"),
+    },
+    DocPage {
+        title: "Commands",
+        body: include_str!("../docs/commands.md"),
+    },
+    DocPage {
+        title: "Apply Mode",
+        body: include_str!("../docs/apply.md"),
+    },
+    DocPage {
+        title: "API Keys",
+        body: include_str!("../docs/api-keys.md"),
+    },
+    DocPage {
+        title: "Providers",
+        body: include_str!("../docs/providers.md"),
+    },
+    DocPage {
+        title: "Custom Providers",
+        body: include_str!("../docs/custom-providers.md"),
+    },
+    DocPage {
+        title: "Sandbox",
+        body: include_str!("../docs/sandbox.md"),
+    },
+    DocPage {
+        title: "Sessions",
+        body: include_str!("../docs/sessions.md"),
+    },
+    DocPage {
+        title: "MCP",
+        body: include_str!("../docs/mcp.md"),
+    },
+    DocPage {
+        title: "Troubleshooting",
+        body: include_str!("../docs/troubleshooting.md"),
+    },
+];
+
+fn handle_docs() -> Result<()> {
+    let mut editor = DefaultEditor::new()?;
+    loop {
+        println!("{}", "Cntx docs".cyan().bold());
+        for (index, page) in DOC_PAGES.iter().enumerate() {
+            println!("  {}. {}", index + 1, page.title);
+        }
+        println!("  q. quit");
+        let input = editor.readline("docs> ")?;
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("q") || input.eq_ignore_ascii_case("quit") {
+            break;
+        }
+        let Some(index) = input
+            .parse::<usize>()
+            .ok()
+            .and_then(|value| value.checked_sub(1))
+        else {
+            println!("choose a number or q");
+            continue;
+        };
+        let Some(page) = DOC_PAGES.get(index) else {
+            println!("no doc page numbered {}", index + 1);
+            continue;
+        };
+        println!();
+        ui::print_markdown(page.body);
+        println!();
+        let _ = editor.readline("press Enter to return to docs...");
+    }
+    Ok(())
+}
+
 async fn handle_endpoint(
     args: EndpointArgs,
     store: &ConfigStore,
@@ -604,15 +730,22 @@ fn handle_session(command: SessionCommand, store: &ConfigStore) -> Result<()> {
         SessionCommand::List => {
             for session in sessions.list()? {
                 println!(
-                    "{} {} {} messages",
+                    "{} {} {} messages  {}",
                     session.id,
                     session.updated_at,
-                    session.messages.len()
+                    session.messages.len(),
+                    session.title
                 );
             }
         }
         SessionCommand::Resume { id } => {
-            let session = sessions.load(&id)?;
+            let session = if let Some(id) = id {
+                sessions.load(&id)?
+            } else {
+                sessions
+                    .latest()?
+                    .ok_or_else(|| anyhow!("no saved sessions yet"))?
+            };
             println!("{}", serde_yaml::to_string(&session)?);
         }
         SessionCommand::Export { id, output } => {
@@ -649,7 +782,27 @@ fn handle_skill(command: SkillCommand, store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
-fn handle_doctor(store: &ConfigStore, config: &AppConfig) -> Result<()> {
+fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool) -> Result<()> {
+    if fix {
+        store.ensure_dirs()?;
+        api_keys::ensure_secrets_file(store)?;
+        install_missing_builtin_presets(config);
+        if config.primary_endpoint.is_none() && config.endpoints.len() == 1 {
+            config.primary_endpoint = config.endpoints.keys().next().cloned();
+        }
+        if config.default_model.is_none() {
+            config.default_model = config
+                .primary_endpoint
+                .as_ref()
+                .and_then(|name| config.endpoints.get(name))
+                .and_then(|endpoint| endpoint.default_model.clone());
+        }
+        store.save(config)?;
+        println!(
+            "{}",
+            "[fixed] ensured config dirs, secrets file, and built-in presets".green()
+        );
+    }
     println!("config: {}", store.config_path().display());
     println!("secrets: {}", store.secrets_path().display());
     println!("models: {}", store.model_cache_path().display());
@@ -672,6 +825,229 @@ fn handle_doctor(store: &ConfigStore, config: &AppConfig) -> Result<()> {
         mcp_enabled
     );
     println!("sandbox: enabled by default; see `cntx sandbox`");
+    if config.primary_endpoint.is_none() {
+        println!("{}", "[warn] no primary endpoint; run `cntx init`".yellow());
+    }
+    if config.endpoints.is_empty() {
+        println!("{}", "[warn] no endpoints configured".yellow());
+    }
+    Ok(())
+}
+
+fn handle_init(args: InitArgs, store: &ConfigStore, config: &mut AppConfig) -> Result<()> {
+    let mut editor = if args.yes {
+        None
+    } else {
+        Some(DefaultEditor::new()?)
+    };
+    let provider = match args.provider {
+        Some(provider) => provider,
+        None if args.yes => ProviderKind::Anthropic,
+        None => prompt_provider(editor.as_mut())?.unwrap_or(ProviderKind::Anthropic),
+    };
+    let api_key_env = args
+        .api_key_env
+        .or_else(|| default_api_key_env(&provider).map(str::to_string));
+    let default_model = match args.default_model {
+        Some(model) => Some(model),
+        None if args.yes => None,
+        None => prompt_optional(editor.as_mut(), "Default model (optional)")?,
+    };
+
+    let mut endpoint = EndpointConfig::new(args.name.clone(), provider.clone());
+    endpoint.api_key_env = api_key_env;
+    endpoint.default_model = default_model.clone();
+    if provider == ProviderKind::OllamaCloud {
+        endpoint.ollama_cloud = Some(Default::default());
+    }
+    config.endpoints.insert(args.name.clone(), endpoint);
+    config.primary_endpoint = Some(args.name.clone());
+    if let Some(model) = default_model {
+        config.default_model = Some(model);
+    }
+    install_missing_builtin_presets(config);
+    store.save(config)?;
+
+    if let Some(key) = args.api_key {
+        api_keys::add(store, provider.as_str(), key.trim())?;
+    }
+
+    println!(
+        "initialized endpoint `{}` for {}",
+        args.name,
+        provider.as_str()
+    );
+    println!("next: cntx --refresh-models");
+    println!("then: cntx \"explain this project\"");
+    Ok(())
+}
+
+fn prompt_provider(editor: Option<&mut DefaultEditor>) -> Result<Option<ProviderKind>> {
+    let Some(editor) = editor else {
+        return Ok(None);
+    };
+    println!("Provider [anthropic/openai/ollama-cloud/ollama-local/openai-compatible]");
+    let value = editor.readline("> ")?;
+    let provider = match value.trim() {
+        "" | "anthropic" => ProviderKind::Anthropic,
+        "openai" | "open-ai" => ProviderKind::OpenAi,
+        "ollama-cloud" => ProviderKind::OllamaCloud,
+        "ollama-local" => ProviderKind::OllamaLocal,
+        "openai-compatible" | "open-ai-compatible" => ProviderKind::OpenAiCompatible,
+        other => return Err(anyhow!("unknown provider `{other}`")),
+    };
+    Ok(Some(provider))
+}
+
+fn prompt_optional(editor: Option<&mut DefaultEditor>, label: &str) -> Result<Option<String>> {
+    let Some(editor) = editor else {
+        return Ok(None);
+    };
+    println!("{label}");
+    let value = editor.readline("> ")?;
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
+fn default_api_key_env(provider: &ProviderKind) -> Option<&'static str> {
+    match provider {
+        ProviderKind::OpenAi => Some("OPENAI_API_KEY"),
+        ProviderKind::Anthropic => Some("ANTHROPIC_API_KEY"),
+        ProviderKind::OpenAiCompatible => Some("OPENAI_API_KEY"),
+        ProviderKind::OllamaLocal => None,
+        ProviderKind::OllamaCloud => Some("OLLAMA_API_KEY"),
+    }
+}
+
+fn handle_bench(
+    cli: &Cli,
+    store: &ConfigStore,
+    config: &AppConfig,
+    prompt: &[String],
+) -> Result<()> {
+    let prompt = prompt.join(" ");
+    if prompt.trim().is_empty() {
+        return Err(anyhow!("provide a prompt to benchmark"));
+    }
+    let optimizer = PromptOptimizer;
+    let optimized = optimizer.optimize(&prompt);
+    let endpoint_name = cli
+        .endpoint
+        .clone()
+        .or_else(|| config.primary_endpoint.clone())
+        .unwrap_or_else(|| "<none>".to_string());
+    let endpoint = endpoint_name
+        .as_str()
+        .ne("<none>")
+        .then(|| config.endpoints.get(&endpoint_name))
+        .flatten();
+    let model = endpoint
+        .and_then(|endpoint| {
+            let cache = ModelCache::load(store).ok()?;
+            ModelRouter::new(&config.routing)
+                .route(
+                    endpoint,
+                    cache.available_for(&endpoint_name),
+                    optimized.report.estimated_tokens,
+                )
+                .map(|decision| decision.model)
+                .or_else(|| config.default_model.clone())
+                .or_else(|| endpoint.default_model.clone())
+        })
+        .or_else(|| cli.model.clone())
+        .unwrap_or_else(|| "<auto>".to_string());
+    let estimate = rough_cost_usd(&model, optimized.report.estimated_tokens, 4096);
+
+    println!("{}", "benchmark".bold());
+    println!("  original chars: {}", optimized.report.original_chars);
+    println!("  optimized chars: {}", optimized.report.optimized_chars);
+    println!(
+        "  estimated input tokens: {}",
+        optimized.report.estimated_tokens
+    );
+    println!(
+        "  duplicate lines removed: {}",
+        optimized.report.duplicate_lines_removed
+    );
+    println!("  endpoint: {endpoint_name}");
+    println!("  routed model: {model}");
+    if let Some(cost) = estimate {
+        println!("  rough request cost: ${cost:.4}");
+    } else {
+        println!("  rough request cost: unknown for this model");
+    }
+    Ok(())
+}
+
+fn rough_cost_usd(model: &str, input_tokens: usize, output_tokens: usize) -> Option<f64> {
+    let lower = model.to_lowercase();
+    let (input_per_million, output_per_million) =
+        if lower.contains("haiku") || lower.contains("mini") || lower.contains("nano") {
+            (0.25, 1.25)
+        } else if lower.contains("sonnet") || lower.contains("gpt-4") || lower.contains("gpt-5") {
+            (3.0, 15.0)
+        } else if lower.contains("opus") || lower.contains("pro") || lower.contains("max") {
+            (15.0, 75.0)
+        } else if lower.contains("ollama") || lower.contains("local") {
+            (0.0, 0.0)
+        } else {
+            return None;
+        };
+    Some(
+        (input_tokens as f64 / 1_000_000.0 * input_per_million)
+            + (output_tokens as f64 / 1_000_000.0 * output_per_million),
+    )
+}
+
+fn handle_demo() -> Result<()> {
+    ui::print_markdown(
+        "# Cntx demo\n\n\
+**Markdown renders** instead of showing raw punctuation.\n\n\
+```rust path=src/lib.rs\n\
+pub fn answer() -> i32 { 42 }\n\
+```\n\n\
+- apply mode parses `path=` blocks\n\
+- sandboxed writes stay in the project\n\
+- `/checklist` shows the last apply result\n",
+    );
+    println!("{}", "working... done".cyan());
+    println!("{}", "file checklist".bold());
+    println!("  {} README.md write within sandbox", "[written]".green());
+    println!(
+        "  {} /tmp/outside.rs path is outside the sandbox",
+        "[outside sandbox]".red()
+    );
+    Ok(())
+}
+
+fn handle_memory(command: MemoryCommand) -> Result<()> {
+    let path = project_root().join(".cntx").join("memory.md");
+    match command {
+        MemoryCommand::Add { text } => {
+            let note = text.join(" ");
+            if note.trim().is_empty() {
+                return Err(anyhow!("provide memory text to add"));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let line = format!("- {}\n", note.trim());
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?
+                .write_all(line.as_bytes())?;
+            println!("added memory to {}", path.display());
+        }
+        MemoryCommand::Show => {
+            if path.exists() {
+                ui::print_markdown(&std::fs::read_to_string(&path)?);
+            } else {
+                println!("no project memory yet; add one with `cntx memory add ...`");
+            }
+        }
+        MemoryCommand::Path => println!("{}", path.display()),
+    }
     Ok(())
 }
 
@@ -792,6 +1168,29 @@ fn handle_provider(
             }
             Ok(())
         }
+        ProviderCommand::Gallery => {
+            for preset in builtin_provider_presets() {
+                println!(
+                    "{} [{}] {} default={}",
+                    preset.name.bold(),
+                    preset.kind.as_str(),
+                    preset.base_url.as_deref().unwrap_or("<provider default>"),
+                    preset.default_model.as_deref().unwrap_or("<auto>")
+                );
+            }
+            Ok(())
+        }
+        ProviderCommand::InstallPreset { name } => {
+            let preset = builtin_provider_presets()
+                .into_iter()
+                .find(|preset| preset.name == name)
+                .ok_or_else(|| anyhow!("unknown built-in provider preset `{name}`"))?;
+            config.custom_providers.insert(preset.name.clone(), preset);
+            store.save(config)?;
+            println!("installed provider preset {name}");
+            println!("next: cntx provider use {name}");
+            Ok(())
+        }
         ProviderCommand::Remove { name } => {
             if config.custom_providers.remove(&name).is_some() {
                 store.save(config)?;
@@ -818,6 +1217,67 @@ fn handle_provider(
             );
             Ok(())
         }
+    }
+}
+
+fn install_missing_builtin_presets(config: &mut AppConfig) {
+    for preset in builtin_provider_presets() {
+        config
+            .custom_providers
+            .entry(preset.name.clone())
+            .or_insert(preset);
+    }
+}
+
+fn builtin_provider_presets() -> Vec<CustomProvider> {
+    vec![
+        provider_preset(
+            "openrouter",
+            CustomProviderKind::OpenAiCompatible,
+            "https://openrouter.ai/api/v1",
+            "OPENROUTER_API_KEY",
+            "openrouter/auto",
+        ),
+        provider_preset(
+            "groq",
+            CustomProviderKind::OpenAiCompatible,
+            "https://api.groq.com/openai/v1",
+            "GROQ_API_KEY",
+            "llama-3.3-70b-versatile",
+        ),
+        provider_preset(
+            "together",
+            CustomProviderKind::OpenAiCompatible,
+            "https://api.together.xyz/v1",
+            "TOGETHER_API_KEY",
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        ),
+        provider_preset(
+            "fireworks",
+            CustomProviderKind::OpenAiCompatible,
+            "https://api.fireworks.ai/inference/v1",
+            "FIREWORKS_API_KEY",
+            "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        ),
+    ]
+}
+
+fn provider_preset(
+    name: &str,
+    kind: CustomProviderKind,
+    base_url: &str,
+    api_key_env: &str,
+    default_model: &str,
+) -> CustomProvider {
+    CustomProvider {
+        name: name.to_string(),
+        kind,
+        base_url: Some(base_url.to_string()),
+        api_key_env: Some(api_key_env.to_string()),
+        default_model: Some(default_model.to_string()),
+        headers: BTreeMap::new(),
+        models_path: None,
+        chat_path: None,
     }
 }
 

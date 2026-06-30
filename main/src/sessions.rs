@@ -88,6 +88,10 @@ impl<'a> SessionStore<'a> {
         Ok(sessions)
     }
 
+    pub fn latest(&self) -> Result<Option<Session>> {
+        Ok(self.list()?.into_iter().next())
+    }
+
     pub fn export(&self, id: &str, output: &Path) -> Result<()> {
         let session = self.load(id)?;
         fs::write(output, serde_json::to_string_pretty(&session)?)?;

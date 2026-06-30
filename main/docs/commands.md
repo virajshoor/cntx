@@ -33,6 +33,7 @@ cntx --model <MODEL_OR_ALIAS>
 cntx --endpoint <ENDPOINT_NAME>
 cntx --mode auto|counsel|allow|request-permission|file-only
 cntx --refresh-models
+cntx --docs                          # open packaged interactive docs
 cntx --no-interactive "single prompt"
 cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
@@ -44,6 +45,36 @@ Counsel mode:
 ```bash
 cntx --mode counsel "refactor the endpoint code with minimal churn"
 ```
+
+## First Run And Diagnostics
+
+```bash
+cntx init --yes --provider anthropic --name work
+cntx init --provider ollama-cloud --default-model deepseek-v4-pro:cloud
+cntx doctor
+cntx doctor --fix
+cntx demo
+cntx --docs
+```
+
+`init` creates or updates an endpoint, sets it primary, installs built-in provider
+presets, and optionally stores a runtime key. `doctor --fix` creates missing local
+config files, ensures the secrets store exists, installs safe provider presets, and
+sets obvious defaults when only one endpoint exists.
+
+`cntx --docs` opens the packaged docs browser. It is compiled into the binary, so
+installed users can read the README, explanation, command reference, apply-mode
+guide, provider docs, sandbox docs, and troubleshooting from the terminal.
+
+## Benchmark And Cost Preview
+
+```bash
+cntx bench "summarize this repository and propose the smallest safe patch"
+```
+
+`bench` does not call a model. It shows original characters, optimized characters,
+estimated input tokens, duplicate lines removed, routed model if one can be chosen,
+and a rough request cost for common model families.
 
 ## API Keys
 
@@ -74,6 +105,8 @@ Provider values: `open-ai`, `anthropic`, `open-ai-compatible`, `ollama-local`,
 ## Custom Providers
 
 ```bash
+cntx provider gallery
+cntx provider install-preset openrouter
 cntx provider add --name gateway --kind open-ai-compatible \
   --base-url https://gateway.example.com/v1 --api-key-env GATEWAY_API_KEY
 cntx provider add --file providers.yaml
@@ -83,6 +116,16 @@ cntx provider remove gateway
 ```
 
 See [Custom providers](custom-providers.md).
+
+## Project Memory
+
+```bash
+cntx memory add prefer focused patches and keep docs updated
+cntx memory show
+cntx memory path
+```
+
+Project memory is stored in `.cntx/memory.md` under the current project root.
 
 ## Doc Search And Token Saving (MCP)
 
@@ -138,9 +181,18 @@ cntx config show
 
 ```bash
 cntx session list
+cntx session resume          # latest session
 cntx session resume <id>
 cntx session export <id> session.json
 cntx session import session.json
+```
+
+## Completions
+
+```bash
+cntx completions zsh
+cntx completions bash
+cntx completions fish
 ```
 
 ## Skills
@@ -155,4 +207,5 @@ cntx skill show repository-standards
 
 ```bash
 cntx doctor
+cntx doctor --fix
 ```

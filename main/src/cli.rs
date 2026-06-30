@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 use crate::config::{CustomProviderKind, OllamaCloudPlan, ProviderKind};
 use crate::permissions::Mode;
@@ -28,6 +29,13 @@ pub struct Cli {
         help = "Refresh model lists from configured provider APIs"
     )]
     pub refresh_models: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Open the packaged interactive docs browser"
+    )]
+    pub docs: bool,
 
     #[arg(long, global = true, help = "Run a single prompt and exit")]
     pub no_interactive: bool,
@@ -69,6 +77,20 @@ pub enum Command {
     /// Manage runtime API keys stored in the gitignored secrets file.
     #[command(subcommand)]
     ApiKey(ApiKeyCommand),
+    /// First-run setup for provider, endpoint, key, and default model.
+    Init(InitArgs),
+    /// Estimate prompt optimization, routing, and rough cost without calling a model.
+    Bench {
+        #[arg(value_name = "PROMPT", trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    /// Show a canned local demo of markdown chat, apply mode, and the checklist.
+    Demo,
+    /// Generate shell completions.
+    Completions { shell: Shell },
+    /// Manage project memory stored in .cntx/memory.md.
+    #[command(subcommand)]
+    Memory(MemoryCommand),
     /// Manage built-in and custom MCP servers (doc search, token saving, tools).
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -87,7 +109,38 @@ pub enum Command {
         yaml: bool,
     },
     /// Show configuration paths and a diagnostics summary.
-    Doctor,
+    Doctor {
+        #[arg(
+            long,
+            help = "Create missing local config files and apply safe defaults"
+        )]
+        fix: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    #[arg(long, value_enum, help = "Provider to configure")]
+    pub provider: Option<ProviderKind>,
+
+    #[arg(
+        long,
+        default_value = "work",
+        help = "Endpoint name to create or update"
+    )]
+    pub name: String,
+
+    #[arg(long, help = "Default model for the endpoint and global default")]
+    pub default_model: Option<String>,
+
+    #[arg(long, help = "Environment variable that stores the API key")]
+    pub api_key_env: Option<String>,
+
+    #[arg(long, help = "Store an API key value in the runtime key store")]
+    pub api_key: Option<String>,
+
+    #[arg(long, help = "Skip interactive prompts and use defaults/flags only")]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -215,10 +268,27 @@ pub enum ProviderCommand {
     },
     /// List configured custom provider presets.
     List,
+    /// List built-in provider presets that can be installed.
+    Gallery,
+    /// Install a built-in provider preset by name.
+    InstallPreset { name: String },
     /// Remove a custom provider preset.
     Remove { name: String },
     /// Create an endpoint from a preset and set it as primary.
     Use { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    /// Append a note to .cntx/memory.md.
+    Add {
+        #[arg(value_name = "TEXT", trailing_var_arg = true)]
+        text: Vec<String>,
+    },
+    /// Print project memory.
+    Show,
+    /// Print the project memory path.
+    Path,
 }
 
 #[derive(Debug, Subcommand)]
@@ -292,7 +362,7 @@ pub enum SessionCommand {
     /// List saved sessions.
     List,
     /// Resume and print a saved session.
-    Resume { id: String },
+    Resume { id: Option<String> },
     /// Export a session to JSON.
     Export { id: String, output: PathBuf },
     /// Import a session from JSON or YAML.

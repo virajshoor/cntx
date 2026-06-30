@@ -99,6 +99,20 @@ cntx model default <model-id-or-alias>
 cntx "write a focused test plan"
 ```
 
+Polish commands for day-one use:
+
+```bash
+cntx init --yes --provider anthropic --name work
+cntx doctor --fix
+cntx bench "refactor this module without changing behavior"
+cntx demo
+cntx completions zsh > ~/.zfunc/_cntx
+cntx memory add prefer small, focused diffs in this repository
+cntx provider gallery
+cntx provider install-preset openrouter
+cntx --docs
+```
+
 Use built-in doc search and token saving:
 
 ```bash
@@ -130,6 +144,7 @@ available in interactive chat.
 ## Documentation
 
 - [Changelog](CHANGELOG.md)
+- [Project explanation](EXPLAIN.md)
 - [API keys](docs/api-keys.md)
 - [Apply mode](docs/apply.md)
 - [Doc search and token saving (MCP)](docs/mcp.md)
