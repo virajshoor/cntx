@@ -219,23 +219,27 @@ Sign and notarize macOS builds (notarytool) so Gatekeeper does not warn users.
 
 ### Homebrew tap (highest-conversion channel)
 
-Create a tap repo, e.g. `cntx-code/homebrew-tap`, with `Formula/cntx-code.rb`:
+Create a tap repo, e.g. `virajshoor/homebrew-cntx`, with `Formula/cntx.rb`.
+For the private tap published in this pass, the formula builds from the crates.io
+source archive:
 
 ```ruby
-class CntxCode < Formula
+class Cntx < Formula
   desc "BYOK, token-efficient AI coding assistant"
   homepage "https://cntxcode.com"
-  url "https://github.com/cntx-code/cntx/releases/download/v0.1.0/cntx-aarch64-apple-darwin.tar.gz"
+  url "https://crates.io/api/v1/crates/cntx/0.1.1/download"
   sha256 "REPLACE_WITH_CHECKSUM"
-  version "0.1.0"
+  version "0.1.1"
   license "MIT"
 
+  depends_on "rust" => :build
+
   def install
-    bin.install "cntx"
+    system "cargo", "install", *std_cargo_args
   end
 
   test do
-    assert_match "Cntx Code", shell_output("#{bin}/cntx --version")
+    assert_match "cntx", shell_output("#{bin}/cntx --version")
   end
 end
 ```
@@ -243,12 +247,13 @@ end
 Users install with:
 
 ```bash
-brew tap cntx-code/tap
-brew install cntx-code
+brew tap virajshoor/cntx
+brew install cntx
 ```
 
-Update the formula's `url`/`sha256`/`version` on every release. Consider
-`homebrew-releaser` or `cargo-dist` to automate this.
+Update the formula's `url`/`sha256`/`version` on every release. Once public binary
+releases exist, switch the formula from source builds to signed release archives
+for faster installs. Consider `homebrew-releaser` or `cargo-dist` to automate this.
 
 ### Other package channels (later)
 
