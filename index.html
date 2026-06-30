@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cntx Code - BYOK Token-Efficient AI Coding CLI</title>
+    <meta
+      name="description"
+      content="Cntx Code is a BYOK, token-efficient AI coding CLI with sandboxed file writes, model routing, and interactive markdown chat."
+    />
+    <link rel="canonical" href="https://cntxcode.com/" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Cntx Code",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "description": "BYOK, token-efficient AI coding CLI with sandboxed file writes.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Cntx Code home">
+        <img src="../main/logo/logo1.png" alt="" />
+        <span>Cntx Code</span>
+      </a>
+      <nav aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#install">Install</a>
+        <a href="#launch">Launch Plan</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <img class="hero-logo" src="../main/logo/logo1.png" alt="Cntx Code logo" />
+          <p class="eyebrow">BYOK AI coding assistant</p>
+          <h1>Cntx Code</h1>
+          <p class="hero-text">
+            A token-efficient coding CLI for developers who want provider choice,
+            sandboxed file writes, markdown chat, and model routing without
+            surrendering their API keys.
+          </p>
+          <div class="hero-actions" id="install">
+            <button class="copy-button" type="button" data-copy="cargo install cntx">
+              cargo install cntx
+            </button>
+            <a class="text-link" href="https://github.com/virajshoor/cntx">GitHub</a>
+          </div>
+        </div>
+        <div class="terminal-shell" aria-label="Cntx terminal demo">
+          <div class="terminal-bar">
+            <span></span>
+            <span></span>
+            <span></span>
+            <strong>cntx</strong>
+          </div>
+          <pre id="terminal-demo"><code></code></pre>
+        </div>
+      </section>
+
+      <section class="proof-band" aria-label="Product summary">
+        <div>
+          <strong>BYOK</strong>
+          <span>OpenAI, Anthropic, Ollama, and OpenAI-compatible endpoints.</span>
+        </div>
+        <div>
+          <strong>Sandboxed</strong>
+          <span>Apply-mode writes stay inside your project by default.</span>
+        </div>
+        <div>
+          <strong>Efficient</strong>
+          <span>Prompt optimization and routing reduce repeated context waste.</span>
+        </div>
+      </section>
+
+      <section class="section" id="features">
+        <div class="section-heading">
+          <p class="eyebrow">Built for repeated work</p>
+          <h2>Agentic coding features with lower install friction.</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>Sandboxed apply mode</h3>
+            <p>
+              The model emits complete fenced blocks with <code>path=</code>.
+              Cntx writes them through a project-root sandbox and prints a file
+              checklist.
+            </p>
+          </article>
+          <article>
+            <h3>Interactive markdown chat</h3>
+            <p>
+              Assistant output, help, inline code, and lists render cleanly in
+              the terminal while a dot animation shows live work.
+            </p>
+          </article>
+          <article>
+            <h3>Bring your own keys</h3>
+            <p>
+              Keys stay in a local runtime store, outside source and outside the
+              published crate.
+            </p>
+          </article>
+          <article>
+            <h3>Model routing</h3>
+            <p>
+              Optimized prompt size routes work to small, balanced, or stronger
+              model families.
+            </p>
+          </article>
+          <article>
+            <h3>MCP-ready</h3>
+            <p>
+              Built-in Context7 doc search and Headroom token saving are
+              configured as on-demand MCP servers.
+            </p>
+          </article>
+          <article>
+            <h3>Counsel mode</h3>
+            <p>
+              A bounded evaluator pass helps choose the right worker model
+              without multiplying context blindly.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section install-section">
+        <div class="install-copy">
+          <p class="eyebrow">Quick start</p>
+          <h2>Install, add a key, and run the first prompt.</h2>
+          <p>
+            Cntx keeps setup plain: install the binary, store a provider key,
+            create an endpoint, then start chatting or apply file edits.
+          </p>
+        </div>
+        <div class="steps" aria-label="Install commands">
+          <button type="button" data-copy="cargo install cntx">cargo install cntx</button>
+          <button type="button" data-copy="cntx api-key add --provider anthropic">
+            cntx api-key add --provider anthropic
+          </button>
+          <button type="button" data-copy="cntx endpoint --new --name work --provider anthropic --default-model claude-sonnet-4.5">
+            cntx endpoint --new --name work --provider anthropic
+          </button>
+          <button type="button" data-copy="cntx --apply --mode allow &quot;update README&quot;">
+            cntx --apply --mode allow "update README"
+          </button>
+        </div>
+      </section>
+
+      <section class="section launch-section" id="launch">
+        <div class="section-heading">
+          <p class="eyebrow">First 1,000 users</p>
+          <h2>Launch where developers already feel token pain.</h2>
+        </div>
+        <ol class="launch-list">
+          <li>Ship GitHub, crates.io, and Homebrew with one-line installs.</li>
+          <li>Record a 60-second demo showing optimization, routing, and apply mode.</li>
+          <li>Recruit 50 hands-on beta users from Rust, LocalLLaMA, BYOK, and agent-tool communities.</li>
+          <li>Turn feedback into weekly releases and public changelog posts.</li>
+          <li>Launch in waves: beta, Show HN plus Reddit, then a benchmark/comparison push.</li>
+        </ol>
+      </section>
+    </main>
+
+    <footer>
+      <span>Cntx Code</span>
+      <a href="https://github.com/virajshoor/cntx">GitHub</a>
+      <a href="https://cntxcode.com">cntxcode.com</a>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
