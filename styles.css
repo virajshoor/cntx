@@ -240,6 +240,82 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
+.docs-hero {
+  padding: clamp(58px, 9vw, 112px) clamp(18px, 4vw, 56px) clamp(32px, 6vw, 64px);
+  border-bottom: 1px solid var(--line);
+}
+
+.docs-hero h1 {
+  max-width: 9ch;
+}
+
+.docs-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: clamp(24px, 5vw, 72px);
+  align-items: start;
+  padding: clamp(38px, 6vw, 76px) clamp(18px, 4vw, 56px);
+}
+
+.docs-sidebar {
+  position: sticky;
+  top: 92px;
+  display: grid;
+  gap: 10px;
+  padding: 16px 0;
+}
+
+.docs-sidebar a {
+  color: var(--muted);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.docs-sidebar a:hover {
+  color: var(--blue);
+}
+
+.docs-content {
+  display: grid;
+  gap: 42px;
+  max-width: 920px;
+}
+
+.docs-content section {
+  padding-bottom: 42px;
+  border-bottom: 1px solid var(--line);
+}
+
+.docs-content p {
+  max-width: 760px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.docs-code {
+  min-height: auto;
+  margin: 18px 0;
+  border-radius: 8px;
+}
+
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.reference-grid article {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.reference-grid code {
+  color: var(--blue);
+  overflow-wrap: anywhere;
+}
+
 .section-heading {
   max-width: 900px;
   margin-bottom: clamp(28px, 5vw, 56px);
@@ -324,8 +400,14 @@ footer span {
   }
 
   .hero,
-  .install-section {
+  .install-section,
+  .docs-layout {
     grid-template-columns: 1fr;
+  }
+
+  .docs-sidebar {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .terminal-shell {
@@ -337,7 +419,8 @@ footer span {
   }
 
   .proof-band,
-  .feature-grid {
+  .feature-grid,
+  .reference-grid {
     grid-template-columns: 1fr;
   }
 }
