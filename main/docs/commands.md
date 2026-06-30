@@ -1,0 +1,158 @@
+# Command Reference
+
+## Prompting
+
+```bash
+cntx "fix the failing tests"
+cntx --model fast "summarize this module"
+cntx --endpoint local "review the latest diff"
+cntx --endpoint ollama-pro --model deepseek-v4-pro:cloud "review architecture risks"
+```
+
+Running `cntx` without a prompt opens the interactive shell. Assistant responses
+and slash-command help render markdown in the terminal, so bold text, inline code,
+lists, and code blocks display as formatted output rather than raw punctuation.
+
+Interactive commands:
+
+```text
+/help
+/status
+/apply
+/checklist
+/sandbox
+/models
+/endpoints
+/exit
+```
+
+## Global Options
+
+```bash
+cntx --model <MODEL_OR_ALIAS>
+cntx --endpoint <ENDPOINT_NAME>
+cntx --mode auto|counsel|allow|request-permission|file-only
+cntx --refresh-models
+cntx --no-interactive "single prompt"
+cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
+cntx --apply                         # write path= fenced blocks through sandbox
+cntx --dangerously-disable-sandbox "edit anywhere"
+```
+
+Counsel mode:
+
+```bash
+cntx --mode counsel "refactor the endpoint code with minimal churn"
+```
+
+## API Keys
+
+```bash
+cntx api-key add    --provider anthropic --value sk-...
+cntx api-key change --provider openai --value sk-...
+cntx api-key delete --provider anthropic
+cntx api-key list
+```
+
+Keys are stored in a gitignored runtime file; see [API keys](api-keys.md).
+
+## Endpoints
+
+```bash
+cntx endpoint --new --name work --provider anthropic --api-key-env ANTHROPIC_API_KEY
+cntx endpoint --change work --default-model claude-sonnet-4.5
+cntx endpoint --remove work
+cntx endpoint --list
+cntx endpoint --set-primary work
+cntx endpoint --new --name gw --from-preset gateway   # from a custom provider preset
+cntx endpoint --import providers.yaml
+```
+
+Provider values: `open-ai`, `anthropic`, `open-ai-compatible`, `ollama-local`,
+`ollama-cloud`.
+
+## Custom Providers
+
+```bash
+cntx provider add --name gateway --kind open-ai-compatible \
+  --base-url https://gateway.example.com/v1 --api-key-env GATEWAY_API_KEY
+cntx provider add --file providers.yaml
+cntx provider list
+cntx provider use gateway
+cntx provider remove gateway
+```
+
+See [Custom providers](custom-providers.md).
+
+## Doc Search And Token Saving (MCP)
+
+```bash
+cntx mcp list
+cntx mcp tools context7      # built-in doc search
+cntx mcp tools headroom      # built-in token saving
+cntx mcp add filesystem npx --arg -y --arg @modelcontextprotocol/server-filesystem
+cntx mcp add --file mcp-servers.yaml
+cntx mcp enable filesystem
+cntx mcp disable filesystem
+cntx mcp remove filesystem
+```
+
+See [Doc search and token saving](mcp.md).
+
+## Models And Aliases
+
+```bash
+cntx model add claude-sonnet-4.5 --name fast
+cntx model add deepseek-v4-pro:cloud --name ollama-pro-coder --endpoint ollama-pro
+cntx model remove fast
+cntx model default claude-sonnet-4.5     # set the persistent default model
+cntx model default --unset               # clear it
+cntx model list
+cntx model refresh
+cntx --refresh-models
+```
+
+Aliases are stored separately from the refreshed model cache, so refreshes preserve
+aliases. `cntx model default <name>` picks the model used when no `--model` override
+applies and routing does not select one.
+
+## Sandbox
+
+```bash
+cntx sandbox
+cntx sandbox --yaml
+cntx --apply --mode allow "write the docs update"
+```
+
+See [Sandbox](sandbox.md).
+
+## Config
+
+```bash
+cntx config init
+cntx config path
+cntx config show
+```
+
+## Sessions
+
+```bash
+cntx session list
+cntx session resume <id>
+cntx session export <id> session.json
+cntx session import session.json
+```
+
+## Skills
+
+```bash
+cntx skill list
+cntx skill new repository-standards "Apply this repository's coding standards"
+cntx skill show repository-standards
+```
+
+## Diagnostics
+
+```bash
+cntx doctor
+```

@@ -1,0 +1,11 @@
+/target
+/.cntx
+.DS_Store
+*.log
+
+# Secrets never enter the repository. Runtime API keys live in a gitignored
+# secrets file inside the user config directory, and an optional local key
+# module is ignored so compiled-in keys never get committed by accident.
+secrets.yaml
+api_keys.local.rs
+*.local.rs
