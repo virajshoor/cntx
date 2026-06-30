@@ -1,20 +1,19 @@
 [package]
 name = "cntx"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Cntx Code: BYOK, token-efficient AI coding assistant with built-in doc search and token saving"
 license = "MIT"
+readme = "README.md"
 homepage = "https://cntxcode.com"
 repository = "https://github.com/virajshoor/cntx"
 keywords = ["ai", "cli", "coding-assistant", "byok", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 # Internal docs, strategy notes, and any local key material never ship with the
-# published crate. Markdown is excluded so consumers do not see internal
-# planning documents; secrets live only in a gitignored runtime file and are
-# never part of the source tree.
+# published crate. Public README/docs/changelog/license are included so crates.io
+# and package-manager users get useful setup material; secrets live only in a
+# gitignored runtime file and are never part of the source tree.
 exclude = [
-    "docs/*",
-    "*.md",
     "AGENTS.md",
     "EXPLAIN.md",
     "HELP.md",

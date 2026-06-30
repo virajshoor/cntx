@@ -57,6 +57,12 @@ Not complete yet:
 
 ## Install
 
+From crates.io:
+
+```bash
+cargo install cntx
+```
+
 From source:
 
 ```bash
@@ -73,14 +79,12 @@ cargo run -- --help
 
 ```bash
 # Add an API key (stored in a gitignored runtime file)
-cntx api-key add --provider anthropic --value sk-ant-...
+cntx api-key add --provider anthropic
 
 # Create an endpoint
 cntx endpoint --new \
   --name work \
-  --provider anthropic \
-  --api-key-env ANTHROPIC_API_KEY \
-  --default-model claude-sonnet-4.5
+  --provider anthropic
 
 cntx endpoint --set-primary work
 cntx --refresh-models
@@ -90,7 +94,8 @@ cntx "explain this repository"
 Pick a default model once and stop passing `--model`:
 
 ```bash
-cntx model default claude-sonnet-4.5
+cntx model list
+cntx model default <model-id-or-alias>
 cntx "write a focused test plan"
 ```
 
@@ -124,8 +129,7 @@ available in interactive chat.
 
 ## Documentation
 
-- [Project explanation](EXPLAIN.md)
-- [Growth, X, the gold tick, build, publish, monetization](HELP.md)
+- [Changelog](CHANGELOG.md)
 - [API keys](docs/api-keys.md)
 - [Apply mode](docs/apply.md)
 - [Doc search and token saving (MCP)](docs/mcp.md)
