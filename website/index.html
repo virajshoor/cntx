@@ -9,6 +9,18 @@
       content="Cntx Code is a BYOK, token-efficient AI coding CLI with sandboxed file writes, model routing, and interactive markdown chat."
     />
     <link rel="canonical" href="https://cntxcode.com/" />
+    <link rel="icon" type="image/png" href="/assets/favicon.png" />
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+    <meta property="og:title" content="Cntx Code - BYOK Token-Efficient AI Coding CLI" />
+    <meta property="og:description" content="A BYOK, token-efficient AI coding CLI with sandboxed file writes, model routing, and interactive markdown chat." />
+    <meta property="og:url" content="https://cntxcode.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://cntxcode.com/assets/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Cntx Code - BYOK Token-Efficient AI Coding CLI" />
+    <meta name="twitter:description" content="A BYOK, token-efficient AI coding CLI with sandboxed file writes, model routing, and interactive markdown chat." />
+    <meta name="twitter:image" content="https://cntxcode.com/assets/og-image.png" />
+    <meta name="theme-color" content="#f7f5ef" />
     <link rel="stylesheet" href="styles.css" />
     <script type="application/ld+json">
       {
@@ -29,22 +41,23 @@
   <body>
     <header class="site-header">
       <a class="brand" href="/" aria-label="Cntx Code home">
-        <img src="../main/logo/logo1.png" alt="" />
+        <img src="assets/logo-small.png" alt="" />
         <span>Cntx Code</span>
       </a>
       <nav aria-label="Primary">
         <a href="#features">Features</a>
         <a href="#install">Install</a>
-        <a href="docs.html">Docs</a>
-        <a href="token-efficient.html">Token Efficient</a>
-        <a href="#launch">Launch Plan</a>
+        <a href="/docs">Docs</a>
+        <a href="/token-efficient">Token Efficient</a>
+        <a href="/byok">BYOK</a>
+        <a href="/claude-code-alternative">Alternative</a>
       </nav>
     </header>
 
     <main>
       <section class="hero">
         <div class="hero-copy">
-          <img class="hero-logo" src="../main/logo/logo1.png" alt="Cntx Code logo" />
+          <img class="hero-logo" src="assets/logo-medium.png" alt="Cntx Code logo" />
           <p class="eyebrow">BYOK AI coding assistant</p>
           <h1>Cntx Code</h1>
           <p class="hero-text">
@@ -53,8 +66,8 @@
             surrendering their API keys.
           </p>
           <div class="hero-actions" id="install">
-            <button class="copy-button" type="button" data-copy="cargo install cntx">
-              cargo install cntx
+            <button class="copy-button" type="button" data-copy="brew tap virajshoor/cntx && brew install cntx">
+              brew install cntx
             </button>
             <button class="copy-button" type="button" data-copy="curl -fsSL https://cntxcode.com/install.sh | sh">
               curl install
@@ -98,8 +111,8 @@
             <h3>Sandboxed apply mode</h3>
             <p>
               The model emits complete fenced blocks with <code>path=</code>.
-              Cntx writes them through a project-root sandbox and prints a file
-              checklist.
+              Cntx previews the changes, writes them through a project-root
+              sandbox, and prints a file checklist.
             </p>
           </article>
           <article>
@@ -150,7 +163,7 @@
           </p>
         </div>
         <div class="steps" aria-label="Install commands">
-          <button type="button" data-copy="cargo install cntx">cargo install cntx</button>
+          <button type="button" data-copy="brew tap virajshoor/cntx && brew install cntx">brew install cntx</button>
           <button type="button" data-copy="curl -fsSL https://cntxcode.com/install.sh | sh">
             curl -fsSL https://cntxcode.com/install.sh | sh
           </button>
@@ -160,31 +173,17 @@
           <button type="button" data-copy="cntx endpoint --new --name work --provider anthropic --default-model claude-sonnet-4.5">
             cntx endpoint --new --name work --provider anthropic
           </button>
-          <button type="button" data-copy="cntx --apply --mode allow &quot;update README&quot;">
-            cntx --apply --mode allow "update README"
+          <button type="button" data-copy="cntx --apply --dry-run --mode allow &quot;preview README changes&quot;">
+            cntx --apply --dry-run --mode allow "preview README changes"
           </button>
         </div>
-      </section>
-
-      <section class="section launch-section" id="launch">
-        <div class="section-heading">
-          <p class="eyebrow">First 1,000 users</p>
-          <h2>Launch where developers already feel token pain.</h2>
-        </div>
-        <ol class="launch-list">
-          <li>Ship GitHub, crates.io, and Homebrew with one-line installs.</li>
-          <li>Record a 60-second demo showing optimization, routing, and apply mode.</li>
-          <li>Recruit 50 hands-on beta users from Rust, LocalLLaMA, BYOK, and agent-tool communities.</li>
-          <li>Turn feedback into weekly releases and public changelog posts.</li>
-          <li>Launch in waves: beta, Show HN plus Reddit, then a benchmark/comparison push.</li>
-        </ol>
       </section>
     </main>
 
     <footer>
       <span>Cntx Code</span>
       <a href="https://github.com/virajshoor/cntx">GitHub</a>
-      <a href="docs.html">Docs</a>
+      <a href="/docs">Docs</a>
       <a href="https://cntxcode.com">cntxcode.com</a>
     </footer>
 

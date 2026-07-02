@@ -6,7 +6,8 @@ efficiency: keep the normal developer workflow while sending less unnecessary
 context to model providers.
 
 - Web: <https://cntxcode.com>
-- Docs: <https://cntx.codes> (redirects to cntxcode.com)
+- Docs: <https://cntxcode.com/docs>
+- Redirect: <https://cntx.codes> points to cntxcode.com
 
 ## What Cntx Code Is For
 
@@ -34,7 +35,8 @@ Implemented:
 - Model cache with deprecation detection and refresh
 - Automatic model routing by prompt size after optimization
 - Counsel mode for token-efficient multi-model collaboration
-- Prompt optimization and bounded project context selection
+- Prompt optimization, project memory, `@file` references, and bounded project
+  context selection
 - Streaming chat adapters
 - Interactive shell with slash commands
 - Interactive markdown rendering, status prompt, and working-dot animation
@@ -42,7 +44,8 @@ Implemented:
 - Skills stored in user or project config
 - Edit sandbox with `--allow-write` and `--dangerously-disable-sandbox`
 - Apply mode that writes `path=` fenced code blocks through the sandbox and
-  prints a file checklist
+  prints a file preview and checklist; `--dry-run` previews without writing
+- `bench --json` and `doctor --json` for automation-friendly diagnostics
 - Built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
 - Permission modes: auto, counsel, allow, request-permission, file-only
 - Unit tests for core behavior
@@ -52,20 +55,22 @@ Not complete yet:
 - Fully autonomous multi-step tool loop
 - Provider-specific tokenizers
 - Semantic repository index
-- Shell completion generation
 - Full agent loop that calls MCP tools automatically
 
 ## Install
 
-From crates.io:
+From Homebrew (recommended):
 
 ```bash
-cargo install cntx
+brew tap virajshoor/cntx
+brew install cntx
 ```
 
 From source:
 
 ```bash
+git clone https://github.com/virajshoor/cntx.git
+cd cntx/main
 cargo install --path .
 ```
 
@@ -104,7 +109,9 @@ Polish commands for day-one use:
 ```bash
 cntx init --yes --provider anthropic --name work
 cntx doctor --fix
+cntx doctor --json
 cntx bench "refactor this module without changing behavior"
+cntx bench --json "refactor this module without changing behavior"
 cntx demo
 cntx completions zsh > ~/.zfunc/_cntx
 cntx memory add prefer small, focused diffs in this repository
@@ -132,8 +139,10 @@ Use apply mode for real file writes:
 
 ```bash
 cntx --apply --mode allow "create a small README section for this crate"
+cntx --apply --dry-run --mode allow "preview a README section for this crate"
 cntx
 /apply
+/dry-run
 /checklist
 ```
 

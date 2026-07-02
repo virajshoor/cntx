@@ -57,6 +57,10 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Safety")]
     pub apply: bool,
 
+    /// In apply mode, show file previews without writing anything.
+    #[arg(long, global = true, help_heading = "Safety")]
+    pub dry_run: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -81,6 +85,8 @@ pub enum Command {
     Init(InitArgs),
     /// Estimate prompt optimization, routing, and rough cost without calling a model.
     Bench {
+        #[arg(long, help = "Print benchmark data as JSON")]
+        json: bool,
         #[arg(value_name = "PROMPT", trailing_var_arg = true)]
         prompt: Vec<String>,
     },
@@ -115,6 +121,8 @@ pub enum Command {
             help = "Create missing local config files and apply safe defaults"
         )]
         fix: bool,
+        #[arg(long, help = "Print diagnostics as JSON")]
+        json: bool,
     },
 }
 

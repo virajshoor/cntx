@@ -3,6 +3,7 @@ pub mod app;
 pub mod apply;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod counsel;
 pub mod errors;
 pub mod interactive;

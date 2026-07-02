@@ -46,13 +46,14 @@ fn prompt(runtime: &Runtime) -> String {
         crate::permissions::Mode::FileOnly => "files",
     };
     let apply = if runtime.apply { "+apply" } else { "" };
+    let dry_run = if runtime.dry_run { "+dry-run" } else { "" };
     let safety = if runtime.sandbox.enabled() {
         "sandbox"
     } else {
         "unsafe"
     };
     format!(
-        "{} {} {}/{} {} {}{} ",
+        "{} {} {}/{} {} {}{}{} ",
         "cntx".cyan().bold(),
         "›".dimmed(),
         endpoint,
@@ -63,6 +64,11 @@ fn prompt(runtime: &Runtime) -> String {
             String::new()
         } else {
             format!(" {}", apply.green())
+        },
+        if dry_run.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", dry_run.yellow())
         }
     )
 }
@@ -91,6 +97,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/api-keys` - list stored API keys, masked\n\
 - `/default <model-or-alias>` - set the default model for this session\n\
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
+- `/dry-run` - toggle apply previews without file writes\n\
 - `/checklist` - show the files from the last apply run\n\
 - `/exit` - quit\n",
             );
@@ -172,6 +179,20 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             );
             Ok(false)
         }
+        Some("/dry-run") => {
+            runtime.dry_run = !runtime.dry_run;
+            println!(
+                "dry run: {}",
+                if runtime.dry_run {
+                    "on (apply previews are shown but files are not written)"
+                        .yellow()
+                        .to_string()
+                } else {
+                    "off".dimmed().to_string()
+                }
+            );
+            Ok(false)
+        }
         Some("/checklist") => {
             if runtime.last_apply_outcomes.is_empty() {
                 println!("no files applied yet; enable /apply and run a prompt");
@@ -206,7 +227,7 @@ fn print_status(runtime: &Runtime) {
         runtime.mode
     );
     println!(
-        "  sandbox: {}   apply: {}   session: {}",
+        "  sandbox: {}   apply: {}   dry-run: {}   session: {}",
         if runtime.sandbox.enabled() {
             "on".green().to_string()
         } else {
@@ -214,6 +235,11 @@ fn print_status(runtime: &Runtime) {
         },
         if runtime.apply {
             "on".green().to_string()
+        } else {
+            "off".dimmed().to_string()
+        },
+        if runtime.dry_run {
+            "on".yellow().to_string()
         } else {
             "off".dimmed().to_string()
         },

@@ -100,13 +100,17 @@ OLLAMA_API_KEY
 
 ## Token Optimization
 
-The current optimizer:
+The current optimizer and prompt context layer:
 
 - normalizes natural-language whitespace
 - removes duplicate natural-language lines
 - preserves code fences
 - collapses excessive blank lines
 - estimates prompt tokens
+- injects project memory from `.cntx/memory.md` when present
+- honors explicit `@file` references with bounded excerpts
+- adds a few keyword-matched project file excerpts while skipping obvious
+  dependency, build, binary, and secret files
 
 Project context selection is bounded so large files do not create unbounded memory pressure. It reads a capped prefix and stores short excerpts.
 
@@ -236,8 +240,9 @@ permission mode. The sandbox is widened with `--allow-write` and disabled with
 Apply mode uses that sandbox today. When `--apply` is enabled, Cntx prepends a
 file-output instruction, parses fenced blocks annotated with `path=`, `file=`, or
 `filename=`, writes complete file contents inside allowed roots, and prints a
-checklist of written, blocked, and outside-sandbox paths. In interactive mode,
-`/checklist` shows the last apply result.
+preview plus a checklist of written, blocked, and outside-sandbox paths. Use
+`--dry-run` or interactive `/dry-run` to preview apply-mode writes without
+touching files. In interactive mode, `/checklist` shows the last apply result.
 
 See [Sandbox](docs/sandbox.md).
 
@@ -266,10 +271,8 @@ Important future work:
 - provider-specific tokenizers
 - semantic repository indexing
 - richer syntax themes and terminal layout controls
-- shell completions
 - setup wizard
 - cost and latency dashboards
-- benchmark command
 - request and response caching
 - plugin API
 - deeper Git integration

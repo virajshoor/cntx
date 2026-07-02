@@ -28,7 +28,16 @@ name = "cntx"
 Cntx writes only complete blocks with a path annotation. Blocks without a path are
 rendered for the user but are not written.
 
-## Checklist
+## Preview And Checklist
+
+Before writing, Cntx prints a compact file preview:
+
+```text
+file preview
+  [modify] src/lib.rs +4 -1 120B -> 180B write within sandbox
+    - old line
+    + new line
+```
 
 After an apply run, Cntx prints a file checklist:
 
@@ -38,8 +47,14 @@ file checklist
   [outside sandbox] /tmp/other.rs path is outside the sandbox
 ```
 
+Use `--dry-run` to preview apply-mode writes without changing files:
+
+```bash
+cntx --apply --dry-run --mode allow "preview the router test"
+```
+
 In interactive mode, `/checklist` shows the last apply result until the next apply
-run.
+run. `/dry-run` toggles preview-only apply behavior.
 
 ## Safety
 

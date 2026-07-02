@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -8,6 +10,7 @@ use clap::CommandFactory;
 use clap_complete::generate;
 use owo_colors::OwoColorize;
 use rustyline::DefaultEditor;
+use serde::Serialize;
 
 use crate::api_keys;
 use crate::cli::{
@@ -19,6 +22,7 @@ use crate::config::{
     ConfigStore, CustomProvider, CustomProviderKind, EndpointConfig, McpServerConfig, ModelAlias,
     ProviderKind,
 };
+use crate::context::{build_prompt_input, PromptContextReport};
 use crate::counsel::{build_evaluation_prompt, build_worker_prompt, plan_counsel, CounselPlan};
 use crate::errors::CntxError;
 use crate::interactive;
@@ -56,7 +60,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Provider(command)) => handle_provider(command, &store, &mut config),
         Some(Command::ApiKey(command)) => handle_api_key(command, &store),
         Some(Command::Init(args)) => handle_init(args, &store, &mut config),
-        Some(Command::Bench { ref prompt }) => handle_bench(&cli, &store, &config, prompt),
+        Some(Command::Bench { json, ref prompt }) => {
+            handle_bench(&cli, &store, &config, json, prompt)
+        }
         Some(Command::Demo) => handle_demo(),
         Some(Command::Completions { shell }) => {
             let mut command = Cli::command();
@@ -70,18 +76,21 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Session(command)) => handle_session(command, &store),
         Some(Command::Skill(command)) => handle_skill(command, &store),
         Some(Command::Sandbox { yaml }) => handle_sandbox(&cli, &config, yaml),
-        Some(Command::Doctor { fix }) => handle_doctor(&store, &mut config, fix),
+        Some(Command::Doctor { fix, json }) => handle_doctor(&store, &mut config, fix, json),
         None => {
             let prompt = cli.prompt.join(" ");
             let sandbox = build_sandbox(&cli);
             let mut runtime = Runtime::new(
                 config,
                 store,
-                cli.endpoint,
-                cli.model,
-                cli.mode,
-                cli.apply,
-                sandbox,
+                RuntimeOptions {
+                    endpoint_override: cli.endpoint,
+                    model_override: cli.model,
+                    mode: cli.mode,
+                    apply: cli.apply,
+                    dry_run: cli.dry_run,
+                    sandbox,
+                },
             )?;
             if !prompt.trim().is_empty() {
                 runtime.run_prompt(&prompt).await
@@ -101,41 +110,51 @@ pub struct Runtime {
     pub model_override: Option<String>,
     pub mode: Mode,
     pub apply: bool,
+    pub dry_run: bool,
     pub sandbox: Sandbox,
     pub session: Session,
     pub last_apply_outcomes: Vec<crate::apply::ApplyOutcome>,
 }
 
+pub struct RuntimeOptions {
+    pub endpoint_override: Option<String>,
+    pub model_override: Option<String>,
+    pub mode: Mode,
+    pub apply: bool,
+    pub dry_run: bool,
+    pub sandbox: Sandbox,
+}
+
 impl Runtime {
-    pub fn new(
-        config: AppConfig,
-        store: ConfigStore,
-        endpoint_override: Option<String>,
-        model_override: Option<String>,
-        mode: Mode,
-        apply: bool,
-        sandbox: Sandbox,
-    ) -> Result<Self> {
+    pub fn new(config: AppConfig, store: ConfigStore, options: RuntimeOptions) -> Result<Self> {
         Ok(Self {
             config,
             store,
-            endpoint_override,
-            model_override,
-            mode,
-            apply,
-            sandbox,
+            endpoint_override: options.endpoint_override,
+            model_override: options.model_override,
+            mode: options.mode,
+            apply: options.apply,
+            dry_run: options.dry_run,
+            sandbox: options.sandbox,
             session: Session::new("interactive"),
             last_apply_outcomes: Vec::new(),
         })
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
+        let prompt_input = build_prompt_input(prompt, self.sandbox.project_root());
         let optimizer = PromptOptimizer;
-        let optimized = optimizer.optimize(prompt);
+        let optimized = optimizer.optimize(&prompt_input.text);
         let (endpoint_name, endpoint) = self.resolve_endpoint()?;
         if self.mode == Mode::Counsel {
             return self
-                .run_counsel_prompt(prompt, &optimized, &endpoint_name, endpoint)
+                .run_counsel_prompt(
+                    prompt,
+                    &optimized,
+                    &prompt_input.context,
+                    &endpoint_name,
+                    endpoint,
+                )
                 .await;
         }
 
@@ -152,6 +171,7 @@ impl Runtime {
                 .report
                 .original_chars
                 .saturating_sub(optimized.report.optimized_chars),
+            prompt_input.context.included_items(),
         );
 
         let mut messages = Vec::new();
@@ -180,10 +200,18 @@ impl Runtime {
         if self.apply {
             let files = crate::apply::extract_files(&assistant_text);
             if !files.is_empty() {
-                let outcomes =
-                    crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
-                crate::apply::print_checklist(&outcomes);
-                self.last_apply_outcomes = outcomes;
+                let previews =
+                    crate::apply::preview(&self.sandbox, &files, self.sandbox.project_root());
+                crate::apply::print_preview(&previews);
+                if self.dry_run {
+                    self.last_apply_outcomes.clear();
+                    println!("{}", "dry run: no files written".yellow());
+                } else {
+                    let outcomes =
+                        crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
+                    crate::apply::print_checklist(&outcomes);
+                    self.last_apply_outcomes = outcomes;
+                }
             } else {
                 self.last_apply_outcomes.clear();
                 println!(
@@ -218,6 +246,7 @@ impl Runtime {
         &mut self,
         prompt: &str,
         optimized: &crate::optimizer::OptimizedPrompt,
+        context: &PromptContextReport,
         endpoint_name: &str,
         endpoint: EndpointConfig,
     ) -> Result<()> {
@@ -236,6 +265,7 @@ impl Runtime {
                 .report
                 .original_chars
                 .saturating_sub(optimized.report.optimized_chars),
+            context.included_items(),
         );
         println!(
             "{} evaluator={} task={}",
@@ -290,10 +320,18 @@ impl Runtime {
         if self.apply {
             let files = crate::apply::extract_files(&assistant_text);
             if !files.is_empty() {
-                let outcomes =
-                    crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
-                crate::apply::print_checklist(&outcomes);
-                self.last_apply_outcomes = outcomes;
+                let previews =
+                    crate::apply::preview(&self.sandbox, &files, self.sandbox.project_root());
+                crate::apply::print_preview(&previews);
+                if self.dry_run {
+                    self.last_apply_outcomes.clear();
+                    println!("{}", "dry run: no files written".yellow());
+                } else {
+                    let outcomes =
+                        crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
+                    crate::apply::print_checklist(&outcomes);
+                    self.last_apply_outcomes = outcomes;
+                }
             } else {
                 self.last_apply_outcomes.clear();
                 println!(
@@ -442,18 +480,25 @@ fn print_prompt_preview(
     mode_label: &str,
     estimated_tokens: usize,
     saved_chars: usize,
+    context_items: usize,
 ) {
     let cost = rough_cost_usd(model, estimated_tokens, 4096)
         .map(|value| format!(" cost~=${value:.4}"))
         .unwrap_or_default();
+    let context = if context_items > 0 {
+        format!(" context={context_items}")
+    } else {
+        String::new()
+    };
     println!(
-        "{} endpoint={} model={} mode={} tokens={} saved={} chars{}",
+        "{} endpoint={} model={} mode={} tokens={} saved={} chars{}{}",
         "->".cyan(),
         endpoint_name,
         model,
         mode_label,
         estimated_tokens,
         saved_chars,
+        context,
         cost
     );
 }
@@ -696,11 +741,14 @@ async fn handle_model(
             Runtime::new(
                 config.clone(),
                 store.clone(),
-                None,
-                None,
-                Mode::Auto,
-                false,
-                sandbox,
+                RuntimeOptions {
+                    endpoint_override: None,
+                    model_override: None,
+                    mode: Mode::Auto,
+                    apply: false,
+                    dry_run: false,
+                    sandbox,
+                },
             )?
             .print_models()
         }
@@ -782,13 +830,16 @@ fn handle_skill(command: SkillCommand, store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
-fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool) -> Result<()> {
+fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool, json: bool) -> Result<()> {
+    let mut fixes = Vec::new();
     if fix {
         store.ensure_dirs()?;
         api_keys::ensure_secrets_file(store)?;
         install_missing_builtin_presets(config);
+        fixes.push("ensured config directories, secrets file, and built-in presets".to_string());
         if config.primary_endpoint.is_none() && config.endpoints.len() == 1 {
             config.primary_endpoint = config.endpoints.keys().next().cloned();
+            fixes.push("selected the only configured endpoint as primary".to_string());
         }
         if config.default_model.is_none() {
             config.default_model = config
@@ -796,42 +847,316 @@ fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool) -> Resu
                 .as_ref()
                 .and_then(|name| config.endpoints.get(name))
                 .and_then(|endpoint| endpoint.default_model.clone());
+            if config.default_model.is_some() {
+                fixes.push(
+                    "copied the primary endpoint default model to the global default".to_string(),
+                );
+            }
         }
         store.save(config)?;
-        println!(
-            "{}",
-            "[fixed] ensured config dirs, secrets file, and built-in presets".green()
-        );
     }
-    println!("config: {}", store.config_path().display());
-    println!("secrets: {}", store.secrets_path().display());
-    println!("models: {}", store.model_cache_path().display());
-    println!("sessions: {}", store.sessions_dir().display());
-    println!("skills: {}", store.skills_dir().display());
-    println!("endpoints: {}", config.endpoints.len());
-    println!(
-        "primary endpoint: {}",
-        config.primary_endpoint.as_deref().unwrap_or("<none>")
-    );
-    println!(
-        "default model: {}",
-        config.default_model.as_deref().unwrap_or("<none>")
-    );
-    println!("custom providers: {}", config.custom_providers.len());
-    let mcp_enabled = mcp::enabled_servers(config).len();
-    println!(
-        "mcp servers: {} configured, {} enabled",
-        config.mcp.servers.len(),
-        mcp_enabled
-    );
-    println!("sandbox: enabled by default; see `cntx sandbox`");
-    if config.primary_endpoint.is_none() {
-        println!("{}", "[warn] no primary endpoint; run `cntx init`".yellow());
-    }
-    if config.endpoints.is_empty() {
-        println!("{}", "[warn] no endpoints configured".yellow());
+
+    let report = build_doctor_report(store, config, fixes)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_doctor_report(&report);
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    paths: DoctorPaths,
+    endpoint_count: usize,
+    primary_endpoint: Option<String>,
+    default_model: Option<String>,
+    custom_provider_count: usize,
+    mcp_configured: usize,
+    mcp_enabled: usize,
+    model_cache: DoctorModelCache,
+    endpoints: Vec<DoctorEndpoint>,
+    mcp_servers: Vec<DoctorMcpServer>,
+    sandbox_default: String,
+    fixes: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorPaths {
+    config: PathBuf,
+    secrets: PathBuf,
+    models: PathBuf,
+    sessions: PathBuf,
+    skills: PathBuf,
+    config_root_writable: bool,
+    secrets_exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorModelCache {
+    exists: bool,
+    refreshed_at: Option<String>,
+    cached_endpoints: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorEndpoint {
+    name: String,
+    provider: String,
+    primary: bool,
+    base_url: String,
+    default_model: Option<String>,
+    key_source: String,
+    has_key: bool,
+    cached_models: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorMcpServer {
+    name: String,
+    enabled: bool,
+    built_in: bool,
+    command: String,
+    command_available: bool,
+}
+
+fn build_doctor_report(
+    store: &ConfigStore,
+    config: &AppConfig,
+    fixes: Vec<String>,
+) -> Result<DoctorReport> {
+    let model_cache = ModelCache::load(store).unwrap_or_default();
+    let mut warnings = Vec::new();
+    if config.primary_endpoint.is_none() {
+        warnings.push("no primary endpoint; run `cntx init`".to_string());
+    } else if let Some(primary) = config.primary_endpoint.as_ref() {
+        if !config.endpoints.contains_key(primary) {
+            warnings.push(format!("primary endpoint `{primary}` does not exist"));
+        }
+    }
+    if config.endpoints.is_empty() {
+        warnings.push("no endpoints configured".to_string());
+    }
+
+    let endpoints = config
+        .endpoints
+        .values()
+        .map(|endpoint| {
+            let (has_key, key_source) = endpoint_key_status(store, endpoint);
+            if endpoint.provider.requires_key_by_default() && !has_key {
+                warnings.push(format!(
+                    "endpoint `{}` has no resolved API key",
+                    endpoint.name
+                ));
+            }
+            let cached_models = model_cache
+                .endpoints
+                .get(&endpoint.name)
+                .map(|cached| {
+                    cached
+                        .models
+                        .iter()
+                        .filter(|model| model.status == crate::models::ModelStatus::Available)
+                        .count()
+                })
+                .unwrap_or(0);
+            if cached_models == 0 {
+                warnings.push(format!(
+                    "endpoint `{}` has no cached models; run `cntx --refresh-models`",
+                    endpoint.name
+                ));
+            }
+            DoctorEndpoint {
+                name: endpoint.name.clone(),
+                provider: endpoint.provider.as_str().to_string(),
+                primary: config.primary_endpoint.as_deref() == Some(endpoint.name.as_str()),
+                base_url: endpoint.base_url.clone(),
+                default_model: endpoint.default_model.clone(),
+                key_source,
+                has_key,
+                cached_models,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mcp_servers = config
+        .mcp
+        .servers
+        .values()
+        .map(|server| {
+            let command_available = executable_available(&server.command);
+            if server.enabled && !command_available {
+                warnings.push(format!(
+                    "MCP server `{}` command `{}` was not found on PATH",
+                    server.name, server.command
+                ));
+            }
+            DoctorMcpServer {
+                name: server.name.clone(),
+                enabled: server.enabled,
+                built_in: server.built_in,
+                command: server.command.clone(),
+                command_available,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(DoctorReport {
+        paths: DoctorPaths {
+            config: store.config_path(),
+            secrets: store.secrets_path(),
+            models: store.model_cache_path(),
+            sessions: store.sessions_dir(),
+            skills: store.skills_dir(),
+            config_root_writable: is_writable_dir(store.root()),
+            secrets_exists: store.secrets_path().exists(),
+        },
+        endpoint_count: config.endpoints.len(),
+        primary_endpoint: config.primary_endpoint.clone(),
+        default_model: config.default_model.clone(),
+        custom_provider_count: config.custom_providers.len(),
+        mcp_configured: config.mcp.servers.len(),
+        mcp_enabled: mcp::enabled_servers(config).len(),
+        model_cache: DoctorModelCache {
+            exists: store.model_cache_path().exists(),
+            refreshed_at: model_cache.refreshed_at.map(|value| value.to_rfc3339()),
+            cached_endpoints: model_cache.endpoints.len(),
+        },
+        endpoints,
+        mcp_servers,
+        sandbox_default: "enabled; writes stay inside the project root unless widened".to_string(),
+        fixes,
+        warnings,
+    })
+}
+
+fn print_doctor_report(report: &DoctorReport) {
+    println!("{}", "diagnostics".bold());
+    for fix in &report.fixes {
+        println!("  {} {fix}", "[fixed]".green());
+    }
+    println!("  config: {}", report.paths.config.display());
+    println!("  secrets: {}", report.paths.secrets.display());
+    println!("  models: {}", report.paths.models.display());
+    println!("  sessions: {}", report.paths.sessions.display());
+    println!("  skills: {}", report.paths.skills.display());
+    println!(
+        "  config root writable: {}",
+        yes_no(report.paths.config_root_writable)
+    );
+    println!("  secrets file: {}", yes_no(report.paths.secrets_exists));
+    println!("  endpoints: {}", report.endpoint_count);
+    println!(
+        "  primary endpoint: {}",
+        report.primary_endpoint.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "  default model: {}",
+        report.default_model.as_deref().unwrap_or("<none>")
+    );
+    println!("  custom providers: {}", report.custom_provider_count);
+    println!(
+        "  model cache: {} cached endpoints, refreshed {}",
+        report.model_cache.cached_endpoints,
+        report
+            .model_cache
+            .refreshed_at
+            .as_deref()
+            .unwrap_or("<never>")
+    );
+    println!(
+        "  mcp servers: {} configured, {} enabled",
+        report.mcp_configured, report.mcp_enabled
+    );
+    println!("  sandbox: {}", report.sandbox_default);
+
+    if !report.endpoints.is_empty() {
+        println!("{}", "endpoints".bold());
+        for endpoint in &report.endpoints {
+            let marker = if endpoint.primary { "*" } else { " " };
+            println!(
+                "  {marker} {} [{}] key={} models={} default={}",
+                endpoint.name,
+                endpoint.provider,
+                endpoint.key_source,
+                endpoint.cached_models,
+                endpoint.default_model.as_deref().unwrap_or("<auto>")
+            );
+        }
+    }
+
+    if !report.mcp_servers.is_empty() {
+        println!("{}", "mcp".bold());
+        for server in &report.mcp_servers {
+            let marker = if server.enabled { "*" } else { " " };
+            let available = if server.command_available {
+                "ok".green().to_string()
+            } else {
+                "missing".yellow().to_string()
+            };
+            println!(
+                "  {marker} {} command={} {}",
+                server.name, server.command, available
+            );
+        }
+    }
+
+    for warning in &report.warnings {
+        println!("  {} {warning}", "[warn]".yellow());
+    }
+}
+
+fn endpoint_key_status(store: &ConfigStore, endpoint: &EndpointConfig) -> (bool, String) {
+    if endpoint
+        .api_key
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        return (true, "inline config key".to_string());
+    }
+    if let Some(env_name) = endpoint.api_key_env.as_ref() {
+        if env::var(env_name).is_ok() {
+            return (true, format!("env:{env_name}"));
+        }
+        if api_keys::resolve_for_provider(store, endpoint).is_some() {
+            return (true, "runtime secrets store".to_string());
+        }
+        return (false, format!("missing env:{env_name}"));
+    }
+    if api_keys::resolve_for_provider(store, endpoint).is_some() {
+        return (true, "runtime secrets store".to_string());
+    }
+    if endpoint.provider.requires_key_by_default() {
+        (false, "missing".to_string())
+    } else {
+        (true, "not required".to_string())
+    }
+}
+
+fn executable_available(command: &str) -> bool {
+    let command_path = PathBuf::from(command);
+    if command_path.components().count() > 1 {
+        return command_path.exists();
+    }
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&paths).any(|path| path.join(command).exists())
+}
+
+fn is_writable_dir(path: &std::path::Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+        .unwrap_or(false)
+}
+
+fn yes_no(value: bool) -> String {
+    if value {
+        "yes".green().to_string()
+    } else {
+        "no".yellow().to_string()
+    }
 }
 
 fn handle_init(args: InitArgs, store: &ConfigStore, config: &mut AppConfig) -> Result<()> {
@@ -923,14 +1248,16 @@ fn handle_bench(
     cli: &Cli,
     store: &ConfigStore,
     config: &AppConfig,
+    json: bool,
     prompt: &[String],
 ) -> Result<()> {
     let prompt = prompt.join(" ");
     if prompt.trim().is_empty() {
         return Err(anyhow!("provide a prompt to benchmark"));
     }
+    let prompt_input = build_prompt_input(&prompt, &project_root());
     let optimizer = PromptOptimizer;
-    let optimized = optimizer.optimize(&prompt);
+    let optimized = optimizer.optimize(&prompt_input.text);
     let endpoint_name = cli
         .endpoint
         .clone()
@@ -941,42 +1268,103 @@ fn handle_bench(
         .ne("<none>")
         .then(|| config.endpoints.get(&endpoint_name))
         .flatten();
-    let model = endpoint
-        .and_then(|endpoint| {
-            let cache = ModelCache::load(store).ok()?;
-            ModelRouter::new(&config.routing)
-                .route(
-                    endpoint,
-                    cache.available_for(&endpoint_name),
-                    optimized.report.estimated_tokens,
-                )
-                .map(|decision| decision.model)
-                .or_else(|| config.default_model.clone())
-                .or_else(|| endpoint.default_model.clone())
-        })
-        .or_else(|| cli.model.clone())
-        .unwrap_or_else(|| "<auto>".to_string());
+    let mut route_reason = None;
+    let model = if let Some(model) = cli.model.clone() {
+        route_reason = Some("CLI model override".to_string());
+        model
+    } else {
+        endpoint
+            .and_then(|endpoint| {
+                let cache = ModelCache::load(store).ok()?;
+                ModelRouter::new(&config.routing)
+                    .route(
+                        endpoint,
+                        cache.available_for(&endpoint_name),
+                        optimized.report.estimated_tokens,
+                    )
+                    .map(|decision| {
+                        route_reason = Some(decision.reason);
+                        decision.model
+                    })
+                    .or_else(|| {
+                        config.default_model.clone().inspect(|_| {
+                            route_reason = Some("configured default model".to_string())
+                        })
+                    })
+                    .or_else(|| {
+                        endpoint
+                            .default_model
+                            .clone()
+                            .inspect(|_| route_reason = Some("endpoint default model".to_string()))
+                    })
+            })
+            .unwrap_or_else(|| "<auto>".to_string())
+    };
     let estimate = rough_cost_usd(&model, optimized.report.estimated_tokens, 4096);
+    let report = BenchReport {
+        user_prompt_chars: prompt.len(),
+        original_chars: optimized.report.original_chars,
+        optimized_chars: optimized.report.optimized_chars,
+        estimated_input_tokens: optimized.report.estimated_tokens,
+        duplicate_lines_removed: optimized.report.duplicate_lines_removed,
+        saved_chars: optimized
+            .report
+            .original_chars
+            .saturating_sub(optimized.report.optimized_chars),
+        endpoint: endpoint_name,
+        routed_model: model,
+        route_reason,
+        rough_request_cost_usd: estimate,
+        context: prompt_input.context,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
 
     println!("{}", "benchmark".bold());
-    println!("  original chars: {}", optimized.report.original_chars);
-    println!("  optimized chars: {}", optimized.report.optimized_chars);
+    println!("  user prompt chars: {}", report.user_prompt_chars);
+    println!(
+        "  original chars sent to optimizer: {}",
+        report.original_chars
+    );
+    println!("  optimized chars: {}", report.optimized_chars);
     println!(
         "  estimated input tokens: {}",
-        optimized.report.estimated_tokens
+        report.estimated_input_tokens
     );
     println!(
         "  duplicate lines removed: {}",
-        optimized.report.duplicate_lines_removed
+        report.duplicate_lines_removed
     );
-    println!("  endpoint: {endpoint_name}");
-    println!("  routed model: {model}");
-    if let Some(cost) = estimate {
+    println!("  context items: {}", report.context.included_items());
+    println!("  endpoint: {}", report.endpoint);
+    println!("  routed model: {}", report.routed_model);
+    if let Some(reason) = report.route_reason.as_ref() {
+        println!("  route reason: {reason}");
+    }
+    if let Some(cost) = report.rough_request_cost_usd {
         println!("  rough request cost: ${cost:.4}");
     } else {
         println!("  rough request cost: unknown for this model");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct BenchReport {
+    user_prompt_chars: usize,
+    original_chars: usize,
+    optimized_chars: usize,
+    estimated_input_tokens: usize,
+    duplicate_lines_removed: usize,
+    saved_chars: usize,
+    endpoint: String,
+    routed_model: String,
+    route_reason: Option<String>,
+    rough_request_cost_usd: Option<f64>,
+    context: PromptContextReport,
 }
 
 fn rough_cost_usd(model: &str, input_tokens: usize, output_tokens: usize) -> Option<f64> {
@@ -1325,11 +1713,28 @@ fn add_or_change_key(store: &ConfigStore, provider: &str, value: Option<String>)
 }
 
 fn prompt_secret(provider: &str) -> Result<String> {
-    let mut editor = DefaultEditor::new()?;
-    // rustyline echoes input; warn the user before they paste a secret.
-    println!("Paste the API key for {provider} and press Enter:");
-    let line = editor.readline("> ")?;
-    Ok(line)
+    #[cfg(unix)]
+    {
+        println!("Paste the API key for {provider} and press Enter:");
+        print!("> ");
+        io::stdout().flush()?;
+        let _ = std::process::Command::new("stty").arg("-echo").status();
+        let mut line = String::new();
+        let read_result = io::stdin().read_line(&mut line);
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        println!();
+        read_result?;
+        Ok(line)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut editor = DefaultEditor::new()?;
+        // rustyline echoes input; warn the user before they paste a secret.
+        println!("Paste the API key for {provider} and press Enter:");
+        let line = editor.readline("> ")?;
+        Ok(line)
+    }
 }
 
 async fn handle_mcp(

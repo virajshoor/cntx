@@ -4,7 +4,7 @@
 //! create or change as a fenced code block annotated with `path=<relative
 //! path>`. After the response is generated, these blocks are extracted and
 //! written through the edit sandbox so writes stay confined to the project
-//! root. A checklist of written and blocked files is printed.
+//! root. A preview and checklist of written and blocked files is printed.
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +45,53 @@ pub struct ApplyOutcome {
     pub reason: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ApplyPreview {
+    pub path: PathBuf,
+    pub status: ApplyPreviewStatus,
+    pub reason: String,
+    pub before_bytes: Option<usize>,
+    pub after_bytes: usize,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub sample: Vec<PreviewLine>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplyPreviewStatus {
+    Create,
+    Modify,
+    NoChange,
+    Blocked,
+    OutsideSandbox,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreviewLine {
+    Added(String),
+    Removed(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplyStatus {
     Written,
     Blocked,
     OutsideSandbox,
     Error,
+}
+
+impl ApplyPreviewStatus {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Create => "[create]",
+            Self::Modify => "[modify]",
+            Self::NoChange => "[no change]",
+            Self::Blocked => "[blocked]",
+            Self::OutsideSandbox => "[outside sandbox]",
+            Self::Error => "[error]",
+        }
+    }
 }
 
 impl ApplyStatus {
@@ -158,6 +199,164 @@ pub fn apply(sandbox: &Sandbox, files: &[ProposedFile], root: &Path) -> Vec<Appl
         .collect()
 }
 
+/// Build a compact change preview without writing files.
+pub fn preview(sandbox: &Sandbox, files: &[ProposedFile], root: &Path) -> Vec<ApplyPreview> {
+    files
+        .iter()
+        .map(|file| preview_one(sandbox, file, root))
+        .collect()
+}
+
+fn preview_one(sandbox: &Sandbox, file: &ProposedFile, root: &Path) -> ApplyPreview {
+    let target = if file.path.is_absolute() {
+        file.path.clone()
+    } else {
+        root.join(&file.path)
+    };
+    let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
+    match verdict.decision {
+        PermissionDecision::Allow => {
+            let before = std::fs::read_to_string(&target).ok();
+            let after_bytes = file.content.len();
+            match before {
+                Some(before) if before == file.content => ApplyPreview {
+                    path: file.path.clone(),
+                    status: ApplyPreviewStatus::NoChange,
+                    reason: verdict.reason,
+                    before_bytes: Some(before.len()),
+                    after_bytes,
+                    added_lines: 0,
+                    removed_lines: 0,
+                    sample: Vec::new(),
+                },
+                Some(before) => {
+                    let diff = preview_diff(&before, &file.content);
+                    ApplyPreview {
+                        path: file.path.clone(),
+                        status: ApplyPreviewStatus::Modify,
+                        reason: verdict.reason,
+                        before_bytes: Some(before.len()),
+                        after_bytes,
+                        added_lines: diff.added_lines,
+                        removed_lines: diff.removed_lines,
+                        sample: diff.sample,
+                    }
+                }
+                None => {
+                    let after_lines = file.content.lines().count();
+                    ApplyPreview {
+                        path: file.path.clone(),
+                        status: ApplyPreviewStatus::Create,
+                        reason: verdict.reason,
+                        before_bytes: None,
+                        after_bytes,
+                        added_lines: after_lines,
+                        removed_lines: 0,
+                        sample: file
+                            .content
+                            .lines()
+                            .take(6)
+                            .map(|line| PreviewLine::Added(line.to_string()))
+                            .collect(),
+                    }
+                }
+            }
+        }
+        PermissionDecision::Deny => {
+            let outside = !sandbox.is_within_allowed(&target);
+            ApplyPreview {
+                path: file.path.clone(),
+                status: if outside {
+                    ApplyPreviewStatus::OutsideSandbox
+                } else {
+                    ApplyPreviewStatus::Blocked
+                },
+                reason: verdict.reason,
+                before_bytes: None,
+                after_bytes: file.content.len(),
+                added_lines: 0,
+                removed_lines: 0,
+                sample: Vec::new(),
+            }
+        }
+        PermissionDecision::Ask => ApplyPreview {
+            path: file.path.clone(),
+            status: ApplyPreviewStatus::Blocked,
+            reason: "interactive approval required; rerun with --mode allow to write".to_string(),
+            before_bytes: None,
+            after_bytes: file.content.len(),
+            added_lines: 0,
+            removed_lines: 0,
+            sample: Vec::new(),
+        },
+    }
+}
+
+struct DiffPreview {
+    added_lines: usize,
+    removed_lines: usize,
+    sample: Vec<PreviewLine>,
+}
+
+fn preview_diff(before: &str, after: &str) -> DiffPreview {
+    let before_lines = before.lines().collect::<Vec<_>>();
+    let after_lines = after.lines().collect::<Vec<_>>();
+    let mut prefix = 0;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix + prefix < before_lines.len()
+        && suffix + prefix < after_lines.len()
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let removed = &before_lines[prefix..before_lines.len().saturating_sub(suffix)];
+    let added = &after_lines[prefix..after_lines.len().saturating_sub(suffix)];
+    let mut sample = Vec::new();
+    for line in removed.iter().take(4) {
+        sample.push(PreviewLine::Removed((*line).to_string()));
+    }
+    for line in added.iter().take(4) {
+        sample.push(PreviewLine::Added((*line).to_string()));
+    }
+    let (added_lines, removed_lines) =
+        line_change_counts(&before_lines, &after_lines).unwrap_or((added.len(), removed.len()));
+    DiffPreview {
+        added_lines,
+        removed_lines,
+        sample,
+    }
+}
+
+fn line_change_counts(before: &[&str], after: &[&str]) -> Option<(usize, usize)> {
+    if before.len().saturating_mul(after.len()) > 100_000 {
+        return None;
+    }
+    let mut previous = vec![0; after.len() + 1];
+    let mut current = vec![0; after.len() + 1];
+    for before_line in before {
+        for (index, after_line) in after.iter().enumerate() {
+            current[index + 1] = if before_line == after_line {
+                previous[index] + 1
+            } else {
+                previous[index + 1].max(current[index])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+    let common = previous[after.len()];
+    Some((after.len() - common, before.len() - common))
+}
+
 fn write_one(sandbox: &Sandbox, file: &ProposedFile, root: &Path) -> ApplyOutcome {
     let target = if file.path.is_absolute() {
         file.path.clone()
@@ -227,6 +426,46 @@ pub fn print_checklist(outcomes: &[ApplyOutcome]) {
     }
 }
 
+/// Print a concise change preview before an apply write.
+pub fn print_preview(previews: &[ApplyPreview]) {
+    if previews.is_empty() {
+        return;
+    }
+    println!("{}", "file preview".bold());
+    for preview in previews {
+        let symbol = match preview.status {
+            ApplyPreviewStatus::Create | ApplyPreviewStatus::Modify => {
+                preview.status.symbol().green().to_string()
+            }
+            ApplyPreviewStatus::NoChange => preview.status.symbol().dimmed().to_string(),
+            ApplyPreviewStatus::OutsideSandbox | ApplyPreviewStatus::Error => {
+                preview.status.symbol().red().to_string()
+            }
+            ApplyPreviewStatus::Blocked => preview.status.symbol().yellow().to_string(),
+        };
+        let before = preview
+            .before_bytes
+            .map(|bytes| format!("{bytes}B"))
+            .unwrap_or_else(|| "new".to_string());
+        println!(
+            "  {} {} +{} -{} {} -> {}B {}",
+            symbol,
+            preview.path.display(),
+            preview.added_lines,
+            preview.removed_lines,
+            before,
+            preview.after_bytes,
+            preview.reason
+        );
+        for line in &preview.sample {
+            match line {
+                PreviewLine::Added(value) => println!("    {}", format!("+ {value}").green()),
+                PreviewLine::Removed(value) => println!("    {}", format!("- {value}").red()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +528,25 @@ mod tests {
         }];
         let outcomes = apply(&sandbox, &files, &root);
         assert_eq!(outcomes[0].status, ApplyStatus::OutsideSandbox);
+    }
+
+    #[test]
+    fn preview_reports_modify_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "one\ntwo\nthree\n").unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sandbox = Sandbox::new(crate::permissions::Mode::Allow, root.clone(), Vec::new());
+        let files = vec![ProposedFile {
+            path: PathBuf::from("src/lib.rs"),
+            language: "rust".to_string(),
+            content: "one\nTWO\nthree\nfour\n".to_string(),
+        }];
+
+        let previews = preview(&sandbox, &files, &root);
+
+        assert_eq!(previews[0].status, ApplyPreviewStatus::Modify);
+        assert_eq!(previews[0].added_lines, 2);
+        assert_eq!(previews[0].removed_lines, 1);
     }
 }

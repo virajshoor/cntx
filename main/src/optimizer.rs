@@ -195,7 +195,19 @@ fn visit_files(root: &Path, visitor: &mut dyn FnMut(&Path) -> Result<()>) -> Res
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("");
-        if file_name == ".git" || file_name == "target" || file_name == "node_modules" {
+        if matches!(
+            file_name,
+            ".git"
+                | ".cntx"
+                | ".cache"
+                | ".next"
+                | "target"
+                | "node_modules"
+                | "dist"
+                | "build"
+                | "coverage"
+                | "vendor"
+        ) {
             continue;
         }
         if path.is_dir() {
@@ -218,6 +230,20 @@ fn should_skip(path: &Path) -> bool {
         || name.ends_with(".pdf")
         || name.ends_with(".zip")
         || name.ends_with(".lock")
+        || matches!(
+            name,
+            ".env"
+                | ".env.local"
+                | ".env.production"
+                | ".npmrc"
+                | ".pypirc"
+                | "secrets.yaml"
+                | "secrets.yml"
+                | "credentials"
+                | "credentials.json"
+                | "id_rsa"
+                | "id_ed25519"
+        )
 }
 
 fn read_context_prefix(path: &Path) -> Result<String> {

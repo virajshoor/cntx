@@ -9,12 +9,19 @@
       content="Read Cntx Code docs for install, setup, BYOK providers, apply mode, sandboxing, sessions, memory, completions, and cntx --docs."
     />
     <link rel="canonical" href="https://cntxcode.com/docs" />
+    <link rel="icon" type="image/png" href="/assets/favicon.png" />
+    <meta property="og:title" content="Cntx Code Docs - Install, Configure, Apply, Providers" />
+    <meta property="og:description" content="Read Cntx Code docs for install, setup, BYOK providers, apply mode, sandboxing, sessions, memory, completions, and cntx --docs." />
+    <meta property="og:url" content="https://cntxcode.com/docs" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://cntxcode.com/assets/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="/" aria-label="Cntx Code home">
-        <img src="../main/logo/logo1.png" alt="" />
+        <img src="assets/logo-small.png" alt="" />
         <span>Cntx Code</span>
       </a>
       <nav aria-label="Docs">
@@ -36,8 +43,8 @@
           <code>cntx --docs</code>.
         </p>
         <div class="hero-actions">
-          <button class="copy-button" type="button" data-copy="cargo install cntx">
-            cargo install cntx
+          <button class="copy-button" type="button" data-copy="brew tap virajshoor/cntx && brew install cntx">
+            brew install cntx
           </button>
           <button class="copy-button" type="button" data-copy="cntx --docs">
             cntx --docs
@@ -67,7 +74,7 @@
               even after installing from crates.io or Homebrew.
             </p>
             <div class="steps">
-              <button type="button" data-copy="cargo install cntx">cargo install cntx</button>
+              <button type="button" data-copy="brew tap virajshoor/cntx && brew install cntx">brew install cntx</button>
               <button type="button" data-copy="cntx --docs">cntx --docs</button>
               <button type="button" data-copy="cntx demo">cntx demo</button>
             </div>
@@ -101,8 +108,8 @@
             <p>
               In apply mode, Cntx asks the model for complete fenced code blocks
               annotated with <code>path=</code>, <code>file=</code>, or
-              <code>filename=</code>. It writes only those blocks through the edit
-              sandbox and prints a checklist.
+              <code>filename=</code>. It previews those blocks, writes only
+              path-annotated files through the edit sandbox, and prints a checklist.
             </p>
             <pre class="docs-code"><code>```rust path=src/example.rs
 pub fn example() {}
@@ -110,6 +117,9 @@ pub fn example() {}
             <div class="steps">
               <button type="button" data-copy="cntx --apply --mode allow &quot;add a small test&quot;">
                 cntx --apply --mode allow "add a small test"
+              </button>
+              <button type="button" data-copy="cntx --apply --dry-run --mode allow &quot;preview a small test&quot;">
+                cntx --apply --dry-run --mode allow "preview a small test"
               </button>
               <button type="button" data-copy="/checklist">/checklist</button>
             </div>

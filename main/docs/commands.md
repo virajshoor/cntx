@@ -19,6 +19,7 @@ Interactive commands:
 /help
 /status
 /apply
+/dry-run
 /checklist
 /sandbox
 /models
@@ -37,8 +38,13 @@ cntx --docs                          # open packaged interactive docs
 cntx --no-interactive "single prompt"
 cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
+cntx --dry-run                       # preview apply-mode writes without writing
 cntx --dangerously-disable-sandbox "edit anywhere"
 ```
+
+Prompts automatically include a small amount of bounded project context when it
+is useful. Use `@path/to/file` in a prompt to force an explicit file excerpt into
+the request while keeping the prompt capped.
 
 Counsel mode:
 
@@ -53,6 +59,7 @@ cntx init --yes --provider anthropic --name work
 cntx init --provider ollama-cloud --default-model deepseek-v4-pro:cloud
 cntx doctor
 cntx doctor --fix
+cntx doctor --json
 cntx demo
 cntx --docs
 ```
@@ -70,11 +77,12 @@ guide, provider docs, sandbox docs, and troubleshooting from the terminal.
 
 ```bash
 cntx bench "summarize this repository and propose the smallest safe patch"
+cntx bench --json "summarize this repository and propose the smallest safe patch"
 ```
 
-`bench` does not call a model. It shows original characters, optimized characters,
-estimated input tokens, duplicate lines removed, routed model if one can be chosen,
-and a rough request cost for common model families.
+`bench` does not call a model. It shows user prompt size, bounded project context,
+optimized characters, estimated input tokens, duplicate lines removed, routed
+model if one can be chosen, and a rough request cost for common model families.
 
 ## API Keys
 
@@ -165,6 +173,7 @@ applies and routing does not select one.
 cntx sandbox
 cntx sandbox --yaml
 cntx --apply --mode allow "write the docs update"
+cntx --apply --dry-run --mode allow "preview the docs update"
 ```
 
 See [Sandbox](sandbox.md).
