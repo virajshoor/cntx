@@ -59,7 +59,13 @@ Not complete yet:
 
 ## Install
 
-From Homebrew (recommended):
+From crates.io (recommended):
+
+```bash
+cargo install cntx
+```
+
+From Homebrew:
 
 ```bash
 brew tap virajshoor/cntx
