@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 - 2026-07-12
+
+- Fix Shift+Tab to dedent (remove indentation) instead of inserting a tab character.
+
 ## 0.2.0 - 2026-07-12
 
 - Add `--tool-use` mode: the model can call tools (read, write, edit, bash,
