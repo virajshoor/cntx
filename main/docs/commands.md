@@ -16,15 +16,16 @@ lists, and code blocks display as formatted output rather than raw punctuation.
 Interactive commands:
 
 ```text
-/help
-/status
-/apply
-/dry-run
-/checklist
-/sandbox
-/models
-/endpoints
-/exit
+/help       - show available commands
+/status     - show endpoint, model, mode, sandbox, and apply state
+/apply      - toggle apply mode
+/dry-run    - toggle apply previews without file writes
+/checklist  - show files from the last apply run
+/theme      - toggle between dark and light mode
+/sandbox    - show sandbox policy
+/models     - list cached models and aliases
+/endpoints  - list endpoints
+/exit       - quit
 ```
 
 ## Global Options
@@ -40,6 +41,7 @@ cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
 cntx --dry-run                       # preview apply-mode writes without writing
 cntx --dangerously-disable-sandbox "edit anywhere"
+cntx --tool-use                      # enable tool-use loop (read, write, edit, bash, glob, grep)
 ```
 
 Prompts automatically include a small amount of bounded project context when it

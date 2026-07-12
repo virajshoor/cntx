@@ -1,6 +1,8 @@
 use anyhow::Result;
 use owo_colors::OwoColorize;
-use rustyline::DefaultEditor;
+use rustyline::{
+    Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers,
+};
 
 use crate::app::Runtime;
 use crate::permissions::Operation;
@@ -8,6 +10,13 @@ use crate::sandbox::SandboxVerdict;
 
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
     let mut editor = DefaultEditor::new()?;
+    // Bind Shift+Tab to insert a tab character for indentation
+    editor.bind_sequence(
+        Event::from(KeyEvent(KeyCode::BackTab, Modifiers::NONE)),
+        EventHandler::from(Cmd::SelfInsert(1, '\t')),
+    );
+    // Initialize theme from config
+    crate::ui::set_theme(crate::ui::Theme::from_str(&runtime.config.ui.theme));
     print_greeting(runtime);
     ui_line("Type `/help` for commands, `/status` for the current workspace, `/exit` to quit.");
 
@@ -99,6 +108,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
 - `/dry-run` - toggle apply previews without file writes\n\
 - `/checklist` - show the files from the last apply run\n\
+- `/theme` - toggle between dark and light mode\n\
 - `/exit` - quit\n",
             );
             Ok(false)
@@ -199,6 +209,14 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             } else {
                 crate::apply::print_checklist(&runtime.last_apply_outcomes);
             }
+            Ok(false)
+        }
+        Some("/theme") => {
+            let new_theme = crate::ui::current_theme().toggle();
+            crate::ui::set_theme(new_theme);
+            runtime.config.ui.theme = new_theme.as_str().to_string();
+            runtime.store.save(&runtime.config)?;
+            println!("theme set to {}", new_theme.as_str());
             Ok(false)
         }
         Some(command) => {

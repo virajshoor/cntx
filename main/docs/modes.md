@@ -30,4 +30,25 @@ Asks before any tool or file operation.
 
 Allows file reads and writes but denies shell and network tools.
 
+## Tool-Use Mode
+
+When `--tool-use` is enabled, the model can call tools in a multi-turn loop:
+
+- **read** - read a file from the filesystem
+- **write** - write content to a file (through the sandbox)
+- **edit** - find-and-replace edits on existing files (through the sandbox)
+- **bash** - run shell commands (through the sandbox)
+- **glob** - list files matching a glob pattern
+- **grep** - search for text in files using regex
+
+The tool loop continues until the model produces a final response with no
+further tool calls, up to a maximum of 25 iterations. All file writes and
+shell commands are subject to the same sandbox and permission policies as
+apply mode.
+
+```bash
+cntx --tool-use "refactor the authentication module"
+cntx --tool-use --mode allow "update the README and add a license file"
+```
+
 These policies are represented in code separately from the UI so future tools and plugins can add operation types without rewriting the CLI.

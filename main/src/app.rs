@@ -90,6 +90,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,
+                    tool_use: cli.tool_use,
                 },
             )?;
             if !prompt.trim().is_empty() {
@@ -111,6 +112,7 @@ pub struct Runtime {
     pub mode: Mode,
     pub apply: bool,
     pub dry_run: bool,
+    pub tool_use: bool,
     pub sandbox: Sandbox,
     pub session: Session,
     pub last_apply_outcomes: Vec<crate::apply::ApplyOutcome>,
@@ -123,6 +125,7 @@ pub struct RuntimeOptions {
     pub apply: bool,
     pub dry_run: bool,
     pub sandbox: Sandbox,
+    pub tool_use: bool,
 }
 
 impl Runtime {
@@ -135,6 +138,7 @@ impl Runtime {
             mode: options.mode,
             apply: options.apply,
             dry_run: options.dry_run,
+            tool_use: options.tool_use,
             sandbox: options.sandbox,
             session: Session::new("interactive"),
             last_apply_outcomes: Vec::new(),
@@ -142,6 +146,8 @@ impl Runtime {
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
+        // Initialize theme from config
+        ui::set_theme(ui::Theme::from_str(&self.config.ui.theme));
         let prompt_input = build_prompt_input(prompt, self.sandbox.project_root());
         let optimizer = PromptOptimizer;
         let optimized = optimizer.optimize(&prompt_input.text);
@@ -160,6 +166,38 @@ impl Runtime {
 
         let model =
             self.resolve_model(&endpoint_name, &endpoint, optimized.report.estimated_tokens)?;
+
+        // Tool-use mode: run the tool loop instead of the normal chat flow
+        if self.tool_use {
+            let mode_label = "tool-use";
+            print_prompt_preview(
+                &endpoint_name,
+                &model,
+                mode_label,
+                optimized.report.estimated_tokens,
+                optimized
+                    .report
+                    .original_chars
+                    .saturating_sub(optimized.report.optimized_chars),
+                prompt_input.context.included_items(),
+            );
+
+            self.session.push("user", prompt);
+            let assistant_text = crate::tools::run_tool_loop(
+                &optimized.text,
+                &self.sandbox,
+                &self.sandbox.project_root(),
+                &endpoint,
+                &model,
+            )
+            .await?;
+            ui::print_markdown(&assistant_text);
+            println!();
+
+            self.session.push("assistant", assistant_text);
+            SessionStore::new(&self.store).save(&self.session)?;
+            return Ok(());
+        }
 
         let mode_label = if self.apply { "apply" } else { "auto" };
         print_prompt_preview(
@@ -226,18 +264,26 @@ impl Runtime {
         Ok(())
     }
 
-    /// Run a chat request, buffering the stream behind a working indicator so
-    /// the terminal does not look frozen. Returns the full assistant text.
+    /// Run a chat request, showing a thinking indicator while the model
+    /// generates. Returns the full assistant text.
     async fn generate(&self, endpoint: &EndpointConfig, request: ChatRequest) -> Result<String> {
-        let spinner = ui::working();
+        let thinking = ui::thinking_start();
         let mut assistant_text = String::new();
+        let mut first_token = true;
         let adapter = adapter_for(endpoint.provider.clone());
         let result = adapter
             .stream_chat(endpoint, request, &mut |delta| {
+                if first_token {
+                    first_token = false;
+                    ui::thinking_stop(thinking.clone());
+                }
                 assistant_text.push_str(&delta);
             })
             .await;
-        spinner.finish_and_clear();
+        // If no tokens arrived (error or empty response), stop thinking
+        if first_token {
+            ui::thinking_stop(thinking);
+        }
         result?;
         Ok(assistant_text)
     }
@@ -748,6 +794,7 @@ async fn handle_model(
                     apply: false,
                     dry_run: false,
                     sandbox,
+                    tool_use: false,
                 },
             )?
             .print_models()

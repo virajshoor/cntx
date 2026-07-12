@@ -49,10 +49,13 @@ Implemented:
 - Built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
 - Permission modes: auto, counsel, allow, request-permission, file-only
 - Unit tests for core behavior
+- Tool-use loop (`--tool-use`) with read, write, edit, bash, glob, and grep tools
+- Thinking indicator with animated dots while the model generates
+- Shift+Tab keybinding for indentation in the interactive shell
+- Dark/light mode toggle (`/theme` slash command)
 
 Not complete yet:
 
-- Fully autonomous multi-step tool loop
 - Provider-specific tokenizers
 - Semantic repository index
 - Full agent loop that calls MCP tools automatically

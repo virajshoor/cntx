@@ -61,6 +61,11 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Safety")]
     pub dry_run: bool,
 
+    /// Enable the tool-use loop so the model can read, write, edit files, and
+    /// run shell commands through tool calls.
+    #[arg(long, global = true, help_heading = "Tools")]
+    pub tool_use: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 

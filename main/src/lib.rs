@@ -16,4 +16,5 @@ pub mod router;
 pub mod sandbox;
 pub mod sessions;
 pub mod skills;
+pub mod tools;
 pub mod ui;

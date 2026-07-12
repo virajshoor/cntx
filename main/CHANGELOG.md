@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 - 2026-07-12
+
+- Add `--tool-use` mode: the model can call tools (read, write, edit, bash,
+  glob, grep) in a multi-turn loop, similar to Claude Code's agent loop.
+- Add thinking indicator: shows "thinking..." with animated dots while the
+  model generates, clearing when the first token arrives.
+- Add Shift+Tab keybinding in the interactive shell for inserting tab characters.
+- Add `/theme` slash command to toggle between dark and light terminal themes.
+- Add `UiConfig.theme` field to persist the chosen theme in config.
+- Improve markdown rendering with theme-aware colors.
+
 ## 0.1.3 - 2026-06-30
 
 - Add `cntx --docs`, an interactive packaged docs browser.
