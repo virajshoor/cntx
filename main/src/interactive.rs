@@ -1,7 +1,7 @@
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use rustyline::{
-    Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers,
+    Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers, Movement,
 };
 
 use crate::app::Runtime;
@@ -10,10 +10,10 @@ use crate::sandbox::SandboxVerdict;
 
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
     let mut editor = DefaultEditor::new()?;
-    // Bind Shift+Tab to insert a tab character for indentation
+    // Bind Shift+Tab to dedent (remove one level of indentation)
     editor.bind_sequence(
         Event::from(KeyEvent(KeyCode::BackTab, Modifiers::NONE)),
-        EventHandler::from(Cmd::SelfInsert(1, '\t')),
+        EventHandler::from(Cmd::Dedent(Movement::WholeLine)),
     );
     // Initialize theme from config
     crate::ui::set_theme(crate::ui::Theme::from_str(&runtime.config.ui.theme));
