@@ -1,5 +1,6 @@
 use anyhow::Result;
 use owo_colors::OwoColorize;
+use rustyline::config::{Builder as ConfigBuilder, EditMode};
 use rustyline::{Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers, Movement};
 
 use crate::app::Runtime;
@@ -7,8 +8,19 @@ use crate::permissions::Operation;
 use crate::sandbox::SandboxVerdict;
 
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
-    let mut editor = DefaultEditor::new()?;
-    // Bind Shift+Tab to dedent (remove one level of indentation)
+    // Configure the editor: emacs mode with indent_size=4, Tab=indent,
+    // Shift+Tab=dedent (like Claude Code).
+    let config = ConfigBuilder::new()
+        .edit_mode(EditMode::Emacs)
+        .indent_size(4)
+        .build();
+    let mut editor = DefaultEditor::with_config(config)?;
+    // Tab => indent the current line
+    editor.bind_sequence(
+        Event::from(KeyEvent(KeyCode::Tab, Modifiers::NONE)),
+        EventHandler::from(Cmd::Indent(Movement::WholeLine)),
+    );
+    // Shift+Tab => dedent (remove one level of indentation)
     editor.bind_sequence(
         Event::from(KeyEvent(KeyCode::BackTab, Modifiers::NONE)),
         EventHandler::from(Cmd::Dedent(Movement::WholeLine)),
@@ -60,13 +72,14 @@ fn prompt(runtime: &Runtime) -> String {
     };
     let apply = if runtime.apply { "+apply" } else { "" };
     let dry_run = if runtime.dry_run { "+dry-run" } else { "" };
+    let tools = if runtime.tool_use { "+tools" } else { "" };
     let safety = if runtime.sandbox.enabled() {
         "sandbox"
     } else {
         "unsafe"
     };
     format!(
-        "{} {} {}/{} {} {}{}{} ",
+        "{} {} {}/{} {} {}{}{}{} ",
         "cntx".cyan().bold(),
         "›".dimmed(),
         endpoint,
@@ -82,6 +95,11 @@ fn prompt(runtime: &Runtime) -> String {
             String::new()
         } else {
             format!(" {}", dry_run.yellow())
+        },
+        if tools.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", tools.cyan())
         }
     )
 }
@@ -111,6 +129,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/api-keys` - list stored API keys, masked\n\
 - `/default <model-or-alias>` - set the default model for this session\n\
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
+- `/tools` - toggle tool-use mode (read, write, edit files, run shell commands)\n\
 - `/dry-run` - toggle apply previews without file writes\n\
 - `/checklist` - show the files from the last apply run\n\
 - `/theme` - toggle between dark and light mode\n\
@@ -217,6 +236,20 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             );
             Ok(false)
         }
+        Some("/tools") => {
+            runtime.tool_use = !runtime.tool_use;
+            println!(
+                "tool-use: {}",
+                if runtime.tool_use {
+                    "on (the model can read, write, edit files and run shell commands)"
+                        .green()
+                        .to_string()
+                } else {
+                    "off".dimmed().to_string()
+                }
+            );
+            Ok(false)
+        }
         Some("/dry-run") => {
             runtime.dry_run = !runtime.dry_run;
             println!(
@@ -273,7 +306,7 @@ fn print_status(runtime: &Runtime) {
         runtime.mode
     );
     println!(
-        "  sandbox: {}   apply: {}   dry-run: {}   session: {}",
+        "  sandbox: {}   apply: {}   dry-run: {}   tools: {}   session: {}",
         if runtime.sandbox.enabled() {
             "on".green().to_string()
         } else {
@@ -286,6 +319,11 @@ fn print_status(runtime: &Runtime) {
         },
         if runtime.dry_run {
             "on".yellow().to_string()
+        } else {
+            "off".dimmed().to_string()
+        },
+        if runtime.tool_use {
+            "on".green().to_string()
         } else {
             "off".dimmed().to_string()
         },

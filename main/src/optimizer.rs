@@ -11,6 +11,14 @@ const INITIAL_PROMPT_BUFFER_CAP: usize = 64 * 1024;
 const MAX_CONTEXT_SCAN_BYTES: u64 = 128 * 1024;
 const MAX_CONTEXT_EXCERPT_CHARS: usize = 800;
 
+/// Maximum directory depth for the recursive context scan. Prevents walking
+/// deep nested trees.
+const MAX_SCAN_DEPTH: usize = 10;
+
+/// Maximum number of files to inspect during the recursive context scan.
+/// Prevents hanging on very large projects.
+const MAX_SCAN_FILES: usize = 5_000;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OptimizationReport {
     pub original_chars: usize,
@@ -188,7 +196,20 @@ fn prompt_terms(prompt: &str) -> Vec<String> {
 }
 
 fn visit_files(root: &Path, visitor: &mut dyn FnMut(&Path) -> Result<()>) -> Result<()> {
-    for entry in fs::read_dir(root)? {
+    let mut file_count = 0usize;
+    visit_files_bounded(root, visitor, 0, &mut file_count)
+}
+
+fn visit_files_bounded(
+    dir: &Path,
+    visitor: &mut dyn FnMut(&Path) -> Result<()>,
+    depth: usize,
+    file_count: &mut usize,
+) -> Result<()> {
+    if depth > MAX_SCAN_DEPTH || *file_count > MAX_SCAN_FILES {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let file_name = path
@@ -207,12 +228,28 @@ fn visit_files(root: &Path, visitor: &mut dyn FnMut(&Path) -> Result<()>) -> Res
                 | "build"
                 | "coverage"
                 | "vendor"
+                | ".npm"
+                | ".cargo"
+                | ".rustup"
+                | "Library"
+                | ".config"
+                | ".local"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".tox"
+                | ".mypy_cache"
+                | ".pytest_cache"
         ) {
             continue;
         }
         if path.is_dir() {
-            visit_files(&path, visitor)?;
+            visit_files_bounded(&path, visitor, depth + 1, file_count)?;
         } else if path.is_file() {
+            *file_count += 1;
+            if *file_count > MAX_SCAN_FILES {
+                return Ok(());
+            }
             visitor(&path)?;
         }
     }

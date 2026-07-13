@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 - 2026-07-13
+
+- Enable tool-use by default in interactive mode so the model can read, write,
+  edit files, and run shell commands without needing `--tool-use`.
+- Add `/tools` slash command to toggle tool-use on/off in the interactive shell.
+- Add base system prompt telling the model it runs locally on the user's
+  machine (not a browser chat), can access the filesystem, and should respond
+  in the user's language.
+- Fix context scan hanging on non-project directories: `project_root()` now
+  searches upward for a `.git` or `.cntx` marker; the recursive context scan
+  is skipped entirely when no marker is found (e.g. home directory).
+- Bound the recursive context scan with a max depth (10) and max file count
+  (5000) to prevent hangs on very large projects.
+- Expand the directory exclusion list for the context scan (`.cargo`, `.npm`,
+  `Library`, `.config`, `.venv`, `__pycache__`, etc.).
+- Fix Shift+Tab: now properly indents/dedents using `indent_size=4` and emacs
+  mode. Tab now indents the current line.
+- Show `+tools` in the interactive prompt bar when tool-use is active.
+
 ## 0.3.0 - 2026-07-13
 
 - Load prior session turns into each new prompt so multi-turn conversation

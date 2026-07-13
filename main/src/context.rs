@@ -52,7 +52,18 @@ pub enum ContextSource {
 }
 
 /// Build the actual prompt sent to the optimizer and provider.
+///
+/// When `scan_project` is false, the recursive keyword-based context search is
+/// skipped entirely. Only explicit `@file` references and project memory are
+/// used. This prevents the CLI from walking an entire home directory or other
+/// large tree when the user is not inside a project workspace.
 pub fn build_prompt_input(prompt: &str, root: &Path) -> PromptInput {
+    build_prompt_input_with_scan(prompt, root, true)
+}
+
+/// Build the prompt with explicit control over whether the recursive project
+/// context scan runs.
+pub fn build_prompt_input_with_scan(prompt: &str, root: &Path, scan_project: bool) -> PromptInput {
     let mut report = PromptContextReport::default();
     let mut sections = Vec::new();
 
@@ -84,7 +95,7 @@ pub fn build_prompt_input(prompt: &str, root: &Path) -> PromptInput {
         }
     }
 
-    if report.files.len() < CONTEXT_FILE_LIMIT {
+    if scan_project && report.files.len() < CONTEXT_FILE_LIMIT {
         let remaining = CONTEXT_FILE_LIMIT - report.files.len();
         if let Ok(candidates) = ProjectContextSelector::new(root).select(prompt, remaining) {
             for candidate in candidates {

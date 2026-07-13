@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -22,7 +22,7 @@ use crate::config::{
     ConfigStore, CustomProvider, CustomProviderKind, EndpointConfig, McpServerConfig, ModelAlias,
     ProviderKind,
 };
-use crate::context::{build_prompt_input, PromptContextReport};
+use crate::context::{build_prompt_input_with_scan, PromptContextReport};
 use crate::counsel::{build_evaluation_prompt, build_worker_prompt, plan_counsel, CounselPlan};
 use crate::errors::CntxError;
 use crate::interactive;
@@ -36,6 +36,15 @@ use crate::sandbox::Sandbox;
 use crate::sessions::{Session, SessionStore};
 use crate::skills::SkillStore;
 use crate::ui;
+
+/// Base system prompt injected into every request. Tells the model to match
+/// the user's language, be concise, and write correct code.
+const BASE_SYSTEM_PROMPT: &str = "You are Cntx Code, a coding assistant running locally in the user's terminal. \
+You have direct access to the user's filesystem and can read, write, and edit files, run shell commands, \
+and search the project. You are NOT a browser-based chat assistant — you run on the user's machine. \
+Respond in the same language the user writes in (English, Chinese, Spanish, etc.). \
+Be concise and direct. Write correct, working code. Use markdown for formatting. \
+Do not add unnecessary preamble or postamble.";
 
 pub async fn run(cli: Cli) -> Result<()> {
     let store = ConfigStore::from_standard_locations()?;
@@ -82,6 +91,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         None => {
             let prompt = cli.prompt.join(" ");
             let sandbox = build_sandbox(&cli);
+            // In interactive mode, enable tool-use by default so the model can
+            // read, write, and run files. The user can still pass --tool-use
+            // explicitly (it's a no-op since it's already on).
+            let interactive_tool_use = cli.tool_use || prompt.trim().is_empty();
             let mut runtime = Runtime::new(
                 config,
                 store,
@@ -92,7 +105,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,
-                    tool_use: cli.tool_use,
+                    tool_use: interactive_tool_use,
                 },
             )?;
             if !prompt.trim().is_empty() {
@@ -154,7 +167,9 @@ impl Runtime {
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
         // Initialize theme from config
         ui::set_theme(ui::Theme::parse(&self.config.ui.theme));
-        let prompt_input = build_prompt_input(prompt, self.sandbox.project_root());
+        let scan_project = has_project_marker(self.sandbox.project_root());
+        let prompt_input =
+            build_prompt_input_with_scan(prompt, self.sandbox.project_root(), scan_project);
         let optimizer = PromptOptimizer;
         let optimized = optimizer.optimize(&prompt_input.text);
         let (endpoint_name, endpoint) = self.resolve_endpoint()?;
@@ -223,6 +238,12 @@ impl Runtime {
         );
 
         let mut messages = Vec::new();
+        // Always inject a base system prompt so the model matches the user's
+        // language and stays concise.
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: BASE_SYSTEM_PROMPT.to_string(),
+        });
         if self.apply {
             messages.push(ChatMessage {
                 role: "system".to_string(),
@@ -1380,7 +1401,11 @@ fn handle_bench(
     if prompt.trim().is_empty() {
         return Err(anyhow!("provide a prompt to benchmark"));
     }
-    let prompt_input = build_prompt_input(&prompt, &project_root());
+    let prompt_input = build_prompt_input_with_scan(
+        &prompt,
+        &project_root(),
+        has_project_marker(&project_root()),
+    );
     let optimizer = PromptOptimizer;
     let optimized = optimizer.optimize(&prompt_input.text);
     let endpoint_name = cli
@@ -2075,8 +2100,39 @@ fn print_endpoints(config: &AppConfig) {
     }
 }
 
+/// Resolve the project root by searching upward for a `.git` or `.cntx`
+/// marker directory. Falls back to the current working directory when no
+/// marker is found, but the caller can check for a marker to decide whether
+/// automatic context scanning is safe.
 fn project_root() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_project_marker(&cwd) {
+            return root;
+        }
+        return cwd;
+    }
+    PathBuf::from(".")
+}
+
+/// Walk upward from `start` looking for a directory containing `.git` or
+/// `.cntx`. Returns the first ancestor that contains one, or `None`.
+fn find_project_marker(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() || dir.join(".cntx").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Returns true when the project root contains a `.git` or `.cntx` marker,
+/// indicating it is a real project workspace where automatic context scanning
+/// is safe and useful. When false, the caller should skip the recursive scan
+/// to avoid walking an entire home directory or other large tree.
+fn has_project_marker(root: &Path) -> bool {
+    root.join(".git").exists() || root.join(".cntx").exists()
 }
 
 #[cfg(test)]
