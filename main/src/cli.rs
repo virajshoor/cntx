@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::config::{CustomProviderKind, OllamaCloudPlan, ProviderKind};
+use crate::config::{CustomProviderKind, Effort, OllamaCloudPlan, ProviderKind};
 use crate::permissions::Mode;
 
 #[derive(Debug, Parser)]
@@ -22,6 +22,14 @@ pub struct Cli {
 
     #[arg(long, global = true, value_enum, default_value_t = Mode::Auto)]
     pub mode: Mode,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = "How deeply the assistant investigates and verifies work"
+    )]
+    pub effort: Option<Effort>,
 
     #[arg(
         long,

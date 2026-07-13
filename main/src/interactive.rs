@@ -90,6 +90,7 @@ fn cycle_mode(runtime: &mut Runtime) {
         Mode::FileOnly => Mode::RequestPermission,
         Mode::RequestPermission => Mode::Auto,
     };
+    runtime.sandbox.set_mode(runtime.mode);
     println!("mode: {:?} - {}", runtime.mode, runtime.mode.description());
 }
 
@@ -150,6 +151,8 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/help` - show this help\n\
 - `/status` - show endpoint, model, mode, sandbox, and apply state\n\
 - `/mode` - show the active permission mode\n\
+- `/effort [low|medium|high]` - show or set investigation and verification depth\n\
+- `/clear` - start a fresh conversation session\n\
 - `/models` - list cached models and aliases\n\
 - `/endpoints` - list endpoints\n\
 - `/skills` - list skills\n\
@@ -173,6 +176,32 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
         }
         Some("/mode") => {
             println!("mode: {:?} - {}", runtime.mode, runtime.mode.description());
+            Ok(false)
+        }
+        Some("/effort") => {
+            if let Some(value) = parts.get(1).copied() {
+                match crate::config::Effort::parse(value) {
+                    Some(effort) => {
+                        runtime.effort = effort;
+                        runtime.config.ui.effort = effort;
+                        runtime.store.save(&runtime.config)?;
+                        println!("effort: {} - {}", effort.as_str(), effort.instruction());
+                    }
+                    None => println!("invalid effort '{value}'; use low, medium, or high"),
+                }
+            } else {
+                println!(
+                    "effort: {} - {}",
+                    runtime.effort.as_str(),
+                    runtime.effort.instruction()
+                );
+            }
+            Ok(false)
+        }
+        Some("/clear") => {
+            runtime.session = crate::sessions::Session::new("interactive");
+            runtime.last_apply_outcomes.clear();
+            println!("started a fresh session: {}", runtime.session.id);
             Ok(false)
         }
         Some("/models") => {
@@ -330,10 +359,11 @@ fn print_status(runtime: &Runtime) {
         .or(runtime.config.default_model.as_deref())
         .unwrap_or("<auto>");
     println!(
-        "  endpoint: {}   model: {}   mode: {:?}",
+        "  endpoint: {}   model: {}   mode: {:?}   effort: {}",
         endpoint.green(),
         model.green(),
-        runtime.mode
+        runtime.mode,
+        runtime.effort.as_str()
     );
     println!(
         "  sandbox: {}   apply: {}   dry-run: {}   session: {}",

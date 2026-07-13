@@ -51,8 +51,10 @@ Implemented:
 - Unit tests for core behavior
 - Tool-use loop (`--tool-use`) with read, write, edit, bash, glob, and grep tools
 - Thinking indicator with animated dots while the model generates
-- Shift+Tab keybinding for indentation in the interactive shell
+- Shift+Tab permission-mode cycling in the interactive shell
 - Dark/light mode toggle (`/theme` slash command)
+- Effort control (`/effort low|medium|high`) for faster or more thorough work
+- Fresh conversation reset (`/clear`) and live streamed-response preview
 
 Not complete yet:
 
@@ -127,6 +129,7 @@ cntx memory add prefer small, focused diffs in this repository
 cntx provider gallery
 cntx provider install-preset openrouter
 cntx --docs
+cntx --effort high "investigate and fix the failing tests"
 ```
 
 Use built-in doc search and token saving:
@@ -153,6 +156,8 @@ cntx
 /apply
 /dry-run
 /checklist
+/effort high
+/clear
 ```
 
 In apply mode, Cntx asks the model for complete fenced code blocks annotated with

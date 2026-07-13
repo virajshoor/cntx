@@ -58,6 +58,11 @@ impl Sandbox {
         self.enabled
     }
 
+    /// Update the permission policy when an interactive mode switch occurs.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.policy = PermissionPolicy::new(mode);
+    }
+
     pub fn evaluate(&self, operation: Operation, path: Option<&Path>) -> SandboxVerdict {
         let base = self.policy.decide(operation);
         if !self.enabled {

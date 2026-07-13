@@ -215,6 +215,8 @@ pub struct UiConfig {
     pub syntax_highlighting: bool,
     pub vim_keys: bool,
     pub mode: Mode,
+    #[serde(default)]
+    pub effort: Effort,
 }
 
 impl Default for UiConfig {
@@ -225,6 +227,44 @@ impl Default for UiConfig {
             syntax_highlighting: true,
             vim_keys: false,
             mode: Mode::Auto,
+            effort: Effort::Medium,
+        }
+    }
+}
+
+/// Controls how deeply the assistant investigates and verifies a request.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Effort {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    pub fn instruction(self) -> &'static str {
+        match self {
+            Self::Low => "Use the minimum investigation necessary. Give a focused answer and avoid unnecessary exploration.",
+            Self::Medium => "Balance speed and thoroughness. Inspect relevant files before editing and verify meaningful changes.",
+            Self::High => "Investigate the relevant code thoroughly before editing. For non-trivial changes, explain the approach briefly, validate assumptions, and run relevant verification after changes.",
         }
     }
 }
@@ -563,5 +603,13 @@ mod tests {
 
         assert_eq!(options.plan, Some(OllamaCloudPlan::Pro));
         assert!(options.subscription_models);
+    }
+
+    #[test]
+    fn effort_parses_common_values() {
+        assert_eq!(Effort::parse("low"), Some(Effort::Low));
+        assert_eq!(Effort::parse("med"), Some(Effort::Medium));
+        assert_eq!(Effort::parse("HIGH"), Some(Effort::High));
+        assert_eq!(Effort::parse("maximum"), None);
     }
 }

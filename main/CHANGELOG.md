@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 - 2026-07-13
+
+- Add configurable effort levels. Use `/effort low`, `/effort medium`, or
+  `/effort high` in interactive mode, or `--effort` for a one-shot prompt.
+  The selected level persists and changes how deeply the assistant investigates
+  and verifies work.
+- Add `/clear` to start a fresh conversation session without restarting Cntx.
+- Make effort instructions available to both normal prompts and tool-use
+  prompts.
+- Fix Shift+Tab mode cycling so it also updates the sandbox's active policy;
+  switching to Allow now changes actual write and shell permissions.
+- Repair GitHub CI by fixing the Clippy sort lint and pinning the workflow to
+  the locally verified Rust 1.93.1 toolchain.
+
 ## 0.3.3 - 2026-07-13
 
 - Fix sandbox blocking writes and shell in interactive mode: the sandbox's

@@ -18,6 +18,9 @@ Interactive commands:
 ```text
 /help       - show available commands
 /status     - show endpoint, model, mode, sandbox, and apply state
+/effort     - show the active effort level
+/effort high - investigate and verify more thoroughly
+/clear      - start a fresh conversation session
 /apply      - toggle apply mode
 /dry-run    - toggle apply previews without file writes
 /checklist  - show files from the last apply run
@@ -34,6 +37,7 @@ Interactive commands:
 cntx --model <MODEL_OR_ALIAS>
 cntx --endpoint <ENDPOINT_NAME>
 cntx --mode auto|counsel|allow|request-permission|file-only
+cntx --effort low|medium|high
 cntx --refresh-models
 cntx --docs                          # open packaged interactive docs
 cntx --no-interactive "single prompt"
@@ -41,7 +45,7 @@ cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
 cntx --dry-run                       # preview apply-mode writes without writing
 cntx --dangerously-disable-sandbox "edit anywhere"
-cntx --tool-use                      # enable tool-use loop (read, write, edit, bash, glob, grep)
+cntx --tool-use                      # enable tool-use for one-shot prompts
 ```
 
 Prompts automatically include a small amount of bounded project context when it

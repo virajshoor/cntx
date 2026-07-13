@@ -38,6 +38,13 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// Session-scoped prompt state supplied to the tool-use loop.
+pub struct ToolLoopPromptContext {
+    pub history: Vec<crate::providers::ChatMessage>,
+    pub skill_prompt: Option<String>,
+    pub effort: crate::config::Effort,
+}
+
 /// The result of executing a tool.
 #[derive(Debug)]
 pub struct ToolResult {
@@ -157,9 +164,9 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 /// Build the tool-use system instruction that tells the model how to call tools.
-pub fn tool_use_system_instruction() -> String {
+pub fn tool_use_system_instruction(effort: crate::config::Effort) -> String {
     let defs = tool_definitions();
-    let mut instruction = String::from(
+    let mut instruction = format!(
         "You are Cntx Code, a coding assistant running locally in the user's terminal. \
 You have direct access to the user's filesystem and can read, write, and edit files, run shell commands, \
 and search the project. You are NOT a browser-based chat assistant — you run on the user's machine. \
@@ -168,9 +175,12 @@ When the user asks you to edit files, use the edit tool. \
 Respond in the same language the user writes in (English, Chinese, Spanish, etc.). \
 Be concise and direct. Write correct, working code. Use markdown for formatting. \
 Do not add unnecessary preamble or postamble.\n\n\
+Effort level: {}. {}\n\n\
 You have access to tools that let you read, write, and edit files, run shell commands, \
 and search the project. When you need to perform an action, call the appropriate tool.\n\n\
 Available tools:\n",
+        effort.as_str(),
+        effort.instruction(),
     );
     for tool in &defs {
         instruction.push_str(&format!(
@@ -682,24 +692,23 @@ pub async fn run_tool_loop(
     project_root: &Path,
     endpoint: &crate::config::EndpointConfig,
     model: &str,
-    history: Vec<crate::providers::ChatMessage>,
-    skill_prompt: Option<String>,
+    prompt_context: ToolLoopPromptContext,
 ) -> Result<String> {
     let adapter = crate::providers::adapter_for(endpoint.provider.clone());
 
     let mut messages = vec![crate::providers::ChatMessage {
         role: "system".to_string(),
-        content: tool_use_system_instruction(),
+        content: tool_use_system_instruction(prompt_context.effort),
     }];
     // Inject the active skill's prompt as a system message if set.
-    if let Some(skill) = skill_prompt {
+    if let Some(skill) = prompt_context.skill_prompt {
         messages.push(crate::providers::ChatMessage {
             role: "system".to_string(),
             content: skill,
         });
     }
     // Inject prior session turns for multi-turn context.
-    messages.extend(history);
+    messages.extend(prompt_context.history);
     messages.push(crate::providers::ChatMessage {
         role: "user".to_string(),
         content: prompt.to_string(),

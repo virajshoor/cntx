@@ -19,8 +19,8 @@ use crate::cli::{
 };
 use crate::config::{
     load_custom_provider_import, load_endpoint_import, load_mcp_server_import, AppConfig,
-    ConfigStore, CustomProvider, CustomProviderKind, EndpointConfig, McpServerConfig, ModelAlias,
-    ProviderKind,
+    ConfigStore, CustomProvider, CustomProviderKind, Effort, EndpointConfig, McpServerConfig,
+    ModelAlias, ProviderKind,
 };
 use crate::context::{build_prompt_input_with_scan, PromptContextReport};
 use crate::counsel::{build_evaluation_prompt, build_worker_prompt, plan_counsel, CounselPlan};
@@ -45,6 +45,14 @@ and search the project. You are NOT a browser-based chat assistant — you run o
 Respond in the same language the user writes in (English, Chinese, Spanish, etc.). \
 Be concise and direct. Write correct, working code. Use markdown for formatting. \
 Do not add unnecessary preamble or postamble.";
+
+fn system_prompt(effort: Effort) -> String {
+    format!(
+        "{BASE_SYSTEM_PROMPT}\n\nEffort level: {}. {}",
+        effort.as_str(),
+        effort.instruction()
+    )
+}
 
 pub async fn run(cli: Cli) -> Result<()> {
     let store = ConfigStore::from_standard_locations()?;
@@ -103,6 +111,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             let sandbox = build_sandbox_with_mode(&cli, effective_mode);
             let interactive_tool_use = cli.tool_use || interactive;
+            let effort = cli.effort.unwrap_or(config.ui.effort);
             let mut runtime = Runtime::new(
                 config,
                 store,
@@ -110,6 +119,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     endpoint_override: cli.endpoint,
                     model_override: cli.model,
                     mode: effective_mode,
+                    effort,
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,
@@ -133,6 +143,7 @@ pub struct Runtime {
     pub endpoint_override: Option<String>,
     pub model_override: Option<String>,
     pub mode: Mode,
+    pub effort: Effort,
     pub apply: bool,
     pub dry_run: bool,
     pub tool_use: bool,
@@ -148,6 +159,7 @@ pub struct RuntimeOptions {
     pub endpoint_override: Option<String>,
     pub model_override: Option<String>,
     pub mode: Mode,
+    pub effort: Effort,
     pub apply: bool,
     pub dry_run: bool,
     pub sandbox: Sandbox,
@@ -162,6 +174,7 @@ impl Runtime {
             endpoint_override: options.endpoint_override,
             model_override: options.model_override,
             mode: options.mode,
+            effort: options.effort,
             apply: options.apply,
             dry_run: options.dry_run,
             tool_use: options.tool_use,
@@ -220,8 +233,11 @@ impl Runtime {
                 self.sandbox.project_root(),
                 &endpoint,
                 &model,
-                history,
-                skill_prompt,
+                crate::tools::ToolLoopPromptContext {
+                    history,
+                    skill_prompt,
+                    effort: self.effort,
+                },
             )
             .await?;
             ui::print_markdown(&assistant_text);
@@ -250,7 +266,7 @@ impl Runtime {
         // language and stays concise.
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: BASE_SYSTEM_PROMPT.to_string(),
+            content: system_prompt(self.effort),
         });
         if self.apply {
             messages.push(ChatMessage {
@@ -847,6 +863,7 @@ async fn handle_model(
                     endpoint_override: None,
                     model_override: None,
                     mode: Mode::Auto,
+                    effort: config.ui.effort,
                     apply: false,
                     dry_run: false,
                     sandbox,
