@@ -1,8 +1,6 @@
 use anyhow::Result;
 use owo_colors::OwoColorize;
-use rustyline::{
-    Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers, Movement,
-};
+use rustyline::{Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers, Movement};
 
 use crate::app::Runtime;
 use crate::permissions::Operation;
@@ -16,7 +14,11 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
         EventHandler::from(Cmd::Dedent(Movement::WholeLine)),
     );
     // Initialize theme from config
-    crate::ui::set_theme(crate::ui::Theme::from_str(&runtime.config.ui.theme));
+    crate::ui::set_theme(crate::ui::Theme::parse(&runtime.config.ui.theme));
+    // Load persistent command history so prior prompts are recallable across
+    // shell restarts. Load errors are non-fatal (first run has no history file).
+    let history_path = runtime.store.history_path();
+    let _ = editor.load_history(&history_path);
     print_greeting(runtime);
     ui_line("Type `/help` for commands, `/status` for the current workspace, `/exit` to quit.");
 
@@ -37,6 +39,8 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
         runtime.run_prompt(input).await?;
     }
 
+    // Persist command history for the next session.
+    let _ = editor.save_history(&history_path);
     Ok(())
 }
 
@@ -100,6 +104,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/models` - list cached models and aliases\n\
 - `/endpoints` - list endpoints\n\
 - `/skills` - list skills\n\
+- `/skill <name>` - activate a skill so its prompt is injected into each request\n\
 - `/session` - show the current session id\n\
 - `/sandbox` - show the edit sandbox policy\n\
 - `/mcp` - list MCP servers\n\
@@ -131,6 +136,29 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
         }
         Some("/skills") => {
             runtime.print_skills()?;
+            Ok(false)
+        }
+        Some("/skill") => {
+            if let Some(name) = parts.get(1).copied() {
+                let store =
+                    crate::skills::SkillStore::new(&runtime.store, runtime.sandbox.project_root());
+                match store.get(name) {
+                    Ok(Some(skill)) => {
+                        runtime.active_skill = Some(skill.clone());
+                        println!("active skill: {} - {}", skill.name, skill.description);
+                    }
+                    Ok(None) => {
+                        println!("no skill named '{name}'; use /skills to list");
+                    }
+                    Err(e) => {
+                        println!("error loading skill: {e}");
+                    }
+                }
+            } else if let Some(skill) = runtime.active_skill.as_ref() {
+                println!("active skill: {} - {}", skill.name, skill.description);
+            } else {
+                println!("no active skill; set one with /skill <name>");
+            }
             Ok(false)
         }
         Some("/session") => {

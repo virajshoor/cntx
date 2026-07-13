@@ -42,6 +42,11 @@ MCP servers are local subprocesses. Cntx Code spawns one only when you run
 `cntx mcp tools <name>` or when an agent loop calls a tool. A normal prompt never
 launches a subprocess, so startup stays fast and there is no background noise.
 
+> **Note:** The autonomous agent loop that invokes MCP tools during a normal prompt
+> is not yet implemented. Today `cntx mcp tools <name>` is a manual inspection tool
+> you use to connect to a server and list the tools it exposes. Automatic
+> invocation of those tools by the assistant during `--tool-use` is planned.
+
 ## Adding A Custom MCP Server
 
 ```bash

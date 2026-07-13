@@ -6,16 +6,22 @@
 //! The loop continues until the model produces a final text response with no
 //! tool calls.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::Serialize;
+use wait_timeout::ChildExt;
 
 use crate::sandbox::Sandbox;
 
 /// Maximum number of tool call iterations per prompt.
 const MAX_TOOL_ITERATIONS: usize = 25;
+
+/// Timeout for shell commands executed by the tool-use loop (seconds).
+const SHELL_TIMEOUT_SECS: u64 = 60;
 
 /// A tool definition sent to the model.
 #[derive(Debug, Serialize)]
@@ -208,11 +214,7 @@ pub fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
 }
 
 /// Execute a tool call and return the result.
-pub fn execute_tool(
-    call: &ToolCall,
-    sandbox: &Sandbox,
-    project_root: &Path,
-) -> ToolResult {
+pub fn execute_tool(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
     match call.name.as_str() {
         "read" => execute_read(call, project_root),
         "write" => execute_write(call, sandbox, project_root),
@@ -275,10 +277,17 @@ fn execute_write(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Too
 
     // Check sandbox
     let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !matches!(verdict.decision, crate::permissions::PermissionDecision::Allow) {
+    if !matches!(
+        verdict.decision,
+        crate::permissions::PermissionDecision::Allow
+    ) {
         return ToolResult {
             tool_name: "write".to_string(),
-            output: format!("Blocked by sandbox: {} ({})", target.display(), verdict.reason),
+            output: format!(
+                "Blocked by sandbox: {} ({})",
+                target.display(),
+                verdict.reason
+            ),
             is_error: true,
         };
     }
@@ -330,10 +339,17 @@ fn execute_edit(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
 
     // Check sandbox
     let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !matches!(verdict.decision, crate::permissions::PermissionDecision::Allow) {
+    if !matches!(
+        verdict.decision,
+        crate::permissions::PermissionDecision::Allow
+    ) {
         return ToolResult {
             tool_name: "edit".to_string(),
-            output: format!("Blocked by sandbox: {} ({})", target.display(), verdict.reason),
+            output: format!(
+                "Blocked by sandbox: {} ({})",
+                target.display(),
+                verdict.reason
+            ),
             is_error: true,
         };
     }
@@ -400,7 +416,10 @@ fn execute_bash(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
 
     // Check sandbox for shell operations
     let verdict = sandbox.evaluate(crate::permissions::Operation::Shell, None);
-    if !matches!(verdict.decision, crate::permissions::PermissionDecision::Allow) {
+    if !matches!(
+        verdict.decision,
+        crate::permissions::PermissionDecision::Allow
+    ) {
         return ToolResult {
             tool_name: "bash".to_string(),
             output: format!("Blocked by sandbox: {}", verdict.reason),
@@ -408,26 +427,56 @@ fn execute_bash(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
         };
     }
 
-    let output = Command::new("sh")
+    // Spawn the command as a child so we can enforce a timeout and kill it if
+    // it runs too long. This prevents a hanging command from freezing the CLI.
+    let mut child = match Command::new("sh")
         .arg("-c")
         .arg(command_str)
         .current_dir(project_root)
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return ToolResult {
+                tool_name: "bash".to_string(),
+                output: format!("Error running command: {}", e),
+                is_error: true,
+            }
+        }
+    };
 
-    match output {
-        Ok(output) => {
-            let mut result = String::new();
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    result.push_str(&stdout);
+    let timeout = Duration::from_secs(SHELL_TIMEOUT_SECS);
+    let wait_result = child.wait_timeout(timeout);
+    match wait_result {
+        Ok(Some(status)) => {
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let stdout_str = stdout
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
+            let stderr_str = stderr
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
+            if status.success() {
+                let mut result = String::new();
+                if !stdout_str.trim().is_empty() {
+                    result.push_str(&stdout_str);
                 }
-                if !output.stderr.is_empty() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr_str.trim().is_empty() {
                     if !result.is_empty() {
                         result.push('\n');
                     }
-                    result.push_str(&format!("(stderr) {}", stderr.trim()));
+                    result.push_str(&format!("(stderr) {}", stderr_str.trim()));
                 }
                 if result.trim().is_empty() {
                     result = "Command completed successfully (no output)".to_string();
@@ -438,26 +487,38 @@ fn execute_bash(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
                     is_error: false,
                 }
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    result.push_str(&stdout);
+                let mut result = String::new();
+                if !stdout_str.trim().is_empty() {
+                    result.push_str(&stdout_str);
                 }
-                if !stderr.trim().is_empty() {
+                if !stderr_str.trim().is_empty() {
                     if !result.is_empty() {
                         result.push('\n');
                     }
-                    result.push_str(&stderr);
+                    result.push_str(&stderr_str);
                 }
                 ToolResult {
                     tool_name: "bash".to_string(),
                     output: format!(
                         "Command exited with code {}:\n{}",
-                        output.status.code().unwrap_or(-1),
+                        status.code().unwrap_or(-1),
                         result.trim()
                     ),
                     is_error: true,
                 }
+            }
+        }
+        Ok(None) => {
+            // Timed out: kill the child and report the timeout.
+            let _ = child.kill();
+            let _ = child.wait();
+            ToolResult {
+                tool_name: "bash".to_string(),
+                output: format!(
+                    "Command timed out after {}s and was killed",
+                    SHELL_TIMEOUT_SECS
+                ),
+                is_error: true,
             }
         }
         Err(e) => ToolResult {
@@ -482,6 +543,11 @@ fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
         Ok(entries) => {
             let paths: Vec<String> = entries
                 .filter_map(|entry| entry.ok())
+                .filter(|p| {
+                    // Exclude secret-named files from glob results.
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    !secret_excludes().contains(&name)
+                })
                 .map(|p| {
                     p.strip_prefix(project_root)
                         .unwrap_or(&p)
@@ -535,6 +601,16 @@ fn execute_grep(call: &ToolCall, project_root: &Path) -> ToolResult {
         .arg(pattern)
         .current_dir(project_root);
 
+    // Exclude secret-named files so the model cannot read credentials through
+    // grep results.
+    for exclude in secret_excludes() {
+        cmd.arg("--exclude").arg(exclude);
+    }
+    // Bound the search to avoid scanning enormous trees.
+    cmd.arg("--exclude-dir").arg(".git");
+    cmd.arg("--exclude-dir").arg("node_modules");
+    cmd.arg("--exclude-dir").arg("target");
+
     if let Some(filter) = path_filter {
         cmd.arg("--include").arg(filter);
     }
@@ -549,10 +625,7 @@ fn execute_grep(call: &ToolCall, project_root: &Path) -> ToolResult {
                 let lines: Vec<&str> = stdout.lines().collect();
                 let total = lines.len();
                 let display: Vec<&str> = lines.iter().take(50).copied().collect();
-                let mut result = format!(
-                    "Found {} match(es) for '{}':\n",
-                    total, pattern
-                );
+                let mut result = format!("Found {} match(es) for '{}':\n", total, pattern);
                 result.push_str(&display.join("\n"));
                 if total > 50 {
                     result.push_str(&format!("\n... and {} more matches", total - 50));
@@ -578,6 +651,11 @@ fn execute_grep(call: &ToolCall, project_root: &Path) -> ToolResult {
     }
 }
 
+/// File names that are excluded from grep/glob results to avoid leaking secrets.
+fn secret_excludes() -> &'static [&'static str] {
+    crate::blocklist::secret_file_names()
+}
+
 /// Resolve a path relative to the project root.
 fn resolve_path(path: &str, project_root: &Path) -> PathBuf {
     let p = PathBuf::from(path);
@@ -596,19 +674,28 @@ pub async fn run_tool_loop(
     project_root: &Path,
     endpoint: &crate::config::EndpointConfig,
     model: &str,
+    history: Vec<crate::providers::ChatMessage>,
+    skill_prompt: Option<String>,
 ) -> Result<String> {
     let adapter = crate::providers::adapter_for(endpoint.provider.clone());
 
-    let mut messages = vec![
-        crate::providers::ChatMessage {
+    let mut messages = vec![crate::providers::ChatMessage {
+        role: "system".to_string(),
+        content: tool_use_system_instruction(),
+    }];
+    // Inject the active skill's prompt as a system message if set.
+    if let Some(skill) = skill_prompt {
+        messages.push(crate::providers::ChatMessage {
             role: "system".to_string(),
-            content: tool_use_system_instruction(),
-        },
-        crate::providers::ChatMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        },
-    ];
+            content: skill,
+        });
+    }
+    // Inject prior session turns for multi-turn context.
+    messages.extend(history);
+    messages.push(crate::providers::ChatMessage {
+        role: "user".to_string(),
+        content: prompt.to_string(),
+    });
 
     for iteration in 0..MAX_TOOL_ITERATIONS {
         let request = crate::providers::ChatRequest {
@@ -657,10 +744,7 @@ pub async fn run_tool_loop(
             };
             messages.push(crate::providers::ChatMessage {
                 role: "user".to_string(),
-                content: format!(
-                    "Tool result for '{}':\n{}",
-                    call.name, result_text
-                ),
+                content: format!("Tool result for '{}':\n{}", call.name, result_text),
             });
         }
 

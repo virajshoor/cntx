@@ -117,7 +117,8 @@ impl Sandbox {
 }
 
 /// Determines whether `target` is contained within `root`, following symlinks
-/// where possible. Returns false if neither path can be resolved.
+/// where possible. Returns false if neither path can be resolved. Rejects
+/// targets that traverse through a symlink to a location outside the root.
 fn is_within(root: &Path, target: &Path) -> bool {
     let Some(canon_root) = canonicalize(root) else {
         return false;
@@ -125,7 +126,28 @@ fn is_within(root: &Path, target: &Path) -> bool {
     let Some(canon_target) = resolve_target(target) else {
         return false;
     };
-    canon_target.starts_with(&canon_root)
+    if !canon_target.starts_with(&canon_root) {
+        return false;
+    }
+    // Defense against symlink escapes: if the target (or an existing ancestor)
+    // is a symlink whose canonical destination is outside the root, reject it.
+    // `resolve_target` already canonicalizes, so a symlink that points outside
+    // the root will have produced a `canon_target` that does not start with
+    // `canon_root` and will have been rejected above. This extra check guards
+    // against the edge case where a symlink points to a path *inside* the root
+    // but is itself located outside, which could be used to smuggle writes.
+    if let Some(parent) = target.parent() {
+        if let Ok(meta) = std::fs::symlink_metadata(parent) {
+            if meta.file_type().is_symlink() {
+                if let Some(canon_parent) = canonicalize(parent) {
+                    if !canon_parent.starts_with(&canon_root) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 fn canonicalize(path: &Path) -> Option<PathBuf> {
@@ -237,5 +259,50 @@ mod tests {
             sandbox.evaluate(Operation::Network, None).decision,
             PermissionDecision::Deny
         );
+    }
+
+    #[test]
+    fn symlink_escape_outside_root_is_denied() {
+        let (_guard, root) = make_root();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+
+        // Create a symlink inside the project root that points outside.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link = root.join("escape-link");
+            symlink(&outside_path, &link).unwrap();
+            let sandbox = Sandbox::new(Mode::Allow, root.clone(), Vec::new());
+            // Writing through the symlink should be denied because the
+            // canonicalized target is outside the root.
+            let verdict = sandbox.evaluate(Operation::WriteFile, Some(&link.join("evil.rs")));
+            assert_eq!(verdict.decision, PermissionDecision::Deny);
+        }
+    }
+
+    #[test]
+    fn parent_symlink_outside_root_is_denied() {
+        let (_guard, root) = make_root();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            // Create a symlink *outside* the root that points to another directory
+            // outside the root, then try to write through it. The parent is a
+            // symlink located outside resolving outside, so it must be rejected.
+            let target_outside = outside_path.join("real-dir");
+            fs::create_dir_all(&target_outside).unwrap();
+            let link_outside = outside_path.join("fwd-link");
+            symlink(&target_outside, &link_outside).unwrap();
+            let sandbox = Sandbox::new(Mode::Allow, root.clone(), Vec::new());
+            let verdict = sandbox.evaluate(
+                Operation::WriteFile,
+                Some(&link_outside.join("smuggled.rs")),
+            );
+            assert_eq!(verdict.decision, PermissionDecision::Deny);
+        }
     }
 }

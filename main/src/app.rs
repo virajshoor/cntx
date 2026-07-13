@@ -76,7 +76,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Session(command)) => handle_session(command, &store),
         Some(Command::Skill(command)) => handle_skill(command, &store),
         Some(Command::Sandbox { yaml }) => handle_sandbox(&cli, &config, yaml),
-        Some(Command::Doctor { fix, json }) => handle_doctor(&store, &mut config, fix, json),
+        Some(Command::Doctor { fix, json, verify }) => {
+            handle_doctor(&store, &mut config, fix, json, verify)
+        }
         None => {
             let prompt = cli.prompt.join(" ");
             let sandbox = build_sandbox(&cli);
@@ -116,6 +118,9 @@ pub struct Runtime {
     pub sandbox: Sandbox,
     pub session: Session,
     pub last_apply_outcomes: Vec<crate::apply::ApplyOutcome>,
+    /// When set, the named skill's prompt is prepended to each prompt as a
+    /// system message so reusable instructions shape the model's behavior.
+    pub active_skill: Option<crate::skills::Skill>,
 }
 
 pub struct RuntimeOptions {
@@ -142,12 +147,13 @@ impl Runtime {
             sandbox: options.sandbox,
             session: Session::new("interactive"),
             last_apply_outcomes: Vec::new(),
+            active_skill: None,
         })
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
         // Initialize theme from config
-        ui::set_theme(ui::Theme::from_str(&self.config.ui.theme));
+        ui::set_theme(ui::Theme::parse(&self.config.ui.theme));
         let prompt_input = build_prompt_input(prompt, self.sandbox.project_root());
         let optimizer = PromptOptimizer;
         let optimized = optimizer.optimize(&prompt_input.text);
@@ -182,13 +188,17 @@ impl Runtime {
                 prompt_input.context.included_items(),
             );
 
+            let history = self.session_history_messages();
+            let skill_prompt = self.active_skill.as_ref().map(|s| s.prompt.clone());
             self.session.push("user", prompt);
             let assistant_text = crate::tools::run_tool_loop(
                 &optimized.text,
                 &self.sandbox,
-                &self.sandbox.project_root(),
+                self.sandbox.project_root(),
                 &endpoint,
                 &model,
+                history,
+                skill_prompt,
             )
             .await?;
             ui::print_markdown(&assistant_text);
@@ -219,6 +229,19 @@ impl Runtime {
                 content: crate::apply::APPLY_SYSTEM_INSTRUCTION.to_string(),
             });
         }
+        // Inject the active skill's prompt as a system message so the model
+        // follows reusable instructions for this session.
+        if let Some(skill) = &self.active_skill {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: skill.prompt.clone(),
+            });
+        }
+        // Inject prior session turns so multi-turn conversation context is
+        // preserved. The number of turns is bounded by config.routing.history_turns.
+        for msg in self.session_history_messages() {
+            messages.push(msg);
+        }
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: optimized.text.clone(),
@@ -235,29 +258,7 @@ impl Runtime {
         ui::print_markdown(&assistant_text);
         println!();
 
-        if self.apply {
-            let files = crate::apply::extract_files(&assistant_text);
-            if !files.is_empty() {
-                let previews =
-                    crate::apply::preview(&self.sandbox, &files, self.sandbox.project_root());
-                crate::apply::print_preview(&previews);
-                if self.dry_run {
-                    self.last_apply_outcomes.clear();
-                    println!("{}", "dry run: no files written".yellow());
-                } else {
-                    let outcomes =
-                        crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
-                    crate::apply::print_checklist(&outcomes);
-                    self.last_apply_outcomes = outcomes;
-                }
-            } else {
-                self.last_apply_outcomes.clear();
-                println!(
-                    "{}",
-                    "no path=-annotated code blocks found to apply".dimmed()
-                );
-            }
-        }
+        self.apply_files(&assistant_text);
 
         self.session.push("assistant", assistant_text);
         SessionStore::new(&self.store).save(&self.session)?;
@@ -363,29 +364,7 @@ impl Runtime {
         ui::print_markdown(&assistant_text);
         println!();
 
-        if self.apply {
-            let files = crate::apply::extract_files(&assistant_text);
-            if !files.is_empty() {
-                let previews =
-                    crate::apply::preview(&self.sandbox, &files, self.sandbox.project_root());
-                crate::apply::print_preview(&previews);
-                if self.dry_run {
-                    self.last_apply_outcomes.clear();
-                    println!("{}", "dry run: no files written".yellow());
-                } else {
-                    let outcomes =
-                        crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
-                    crate::apply::print_checklist(&outcomes);
-                    self.last_apply_outcomes = outcomes;
-                }
-            } else {
-                self.last_apply_outcomes.clear();
-                println!(
-                    "{}",
-                    "no path=-annotated code blocks found to apply".dimmed()
-                );
-            }
-        }
+        self.apply_files(&assistant_text);
 
         self.session.push(
             "assistant",
@@ -393,6 +372,61 @@ impl Runtime {
         );
         SessionStore::new(&self.store).save(&self.session)?;
         Ok(())
+    }
+
+    /// Process apply mode for the given assistant text: extract `path=` blocks,
+    /// preview, and optionally write them through the sandbox. Updates
+    /// `last_apply_outcomes`. Shared by normal and counsel prompt flows.
+    fn apply_files(&mut self, assistant_text: &str) {
+        if !self.apply {
+            return;
+        }
+        let files = crate::apply::extract_files(assistant_text);
+        if !files.is_empty() {
+            let previews =
+                crate::apply::preview(&self.sandbox, &files, self.sandbox.project_root());
+            crate::apply::print_preview(&previews);
+            if self.dry_run {
+                self.last_apply_outcomes.clear();
+                println!("{}", "dry run: no files written".yellow());
+            } else {
+                let outcomes =
+                    crate::apply::apply(&self.sandbox, &files, self.sandbox.project_root());
+                crate::apply::print_checklist(&outcomes);
+                self.last_apply_outcomes = outcomes;
+            }
+        } else {
+            self.last_apply_outcomes.clear();
+            println!(
+                "{}",
+                "no path=-annotated code blocks found to apply".dimmed()
+            );
+        }
+    }
+
+    /// Build a bounded list of prior session messages to inject into the next
+    /// prompt. Returns user/assistant pairs from the current session, excluding
+    /// the most recent user message (which is added separately as the new turn).
+    fn session_history_messages(&self) -> Vec<ChatMessage> {
+        let limit = self.config.routing.history_turns;
+        if limit == 0 || self.session.messages.is_empty() {
+            return Vec::new();
+        }
+        // Exclude the last message if it is the current user prompt already pushed.
+        // We take messages before the final user turn that is about to be sent.
+        let msgs = &self.session.messages;
+        // The caller pushes the user prompt *after* calling this, so we use all
+        // messages currently in the session, bounded to 2*limit (limit turns).
+        let take = msgs.len().min(limit.saturating_mul(2));
+        let start = msgs.len().saturating_sub(take);
+        msgs[start..]
+            .iter()
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect()
     }
 
     pub fn print_models(&self) -> Result<()> {
@@ -877,7 +911,13 @@ fn handle_skill(command: SkillCommand, store: &ConfigStore) -> Result<()> {
     Ok(())
 }
 
-fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool, json: bool) -> Result<()> {
+fn handle_doctor(
+    store: &ConfigStore,
+    config: &mut AppConfig,
+    fix: bool,
+    json: bool,
+    verify: bool,
+) -> Result<()> {
     let mut fixes = Vec::new();
     if fix {
         store.ensure_dirs()?;
@@ -909,6 +949,44 @@ fn handle_doctor(store: &ConfigStore, config: &mut AppConfig, fix: bool, json: b
     } else {
         print_doctor_report(&report);
     }
+
+    if verify {
+        println!("\n{}", "Verification checks".cyan().bold());
+        let checks = [
+            ("cargo fmt --check", "fmt", "fmt", &[] as &[&str]),
+            (
+                "cargo clippy --all-targets -- -D warnings",
+                "clippy",
+                "clippy",
+                &["--all-targets", "--", "-D", "warnings"] as &[&str],
+            ),
+            ("cargo test", "test", "test", &[] as &[&str]),
+            ("cargo build", "build", "build", &[] as &[&str]),
+        ];
+        let mut all_passed = true;
+        for (label, _sub, sub_args, extra_args) in checks {
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg(sub_args);
+            for a in extra_args {
+                cmd.arg(a);
+            }
+            let status = cmd.stdout(std::process::Stdio::null()).status();
+            let passed = status.map(|s| s.success()).unwrap_or(false);
+            if !passed {
+                all_passed = false;
+            }
+            let mark = if passed {
+                "PASS".green().to_string()
+            } else {
+                "FAIL".red().to_string()
+            };
+            println!("  [{mark}] {label}");
+        }
+        if !all_passed {
+            println!("{}", "one or more verification checks failed".yellow());
+        }
+    }
+
     Ok(())
 }
 
@@ -1310,6 +1388,13 @@ fn handle_bench(
         .clone()
         .or_else(|| config.primary_endpoint.clone())
         .unwrap_or_else(|| "<none>".to_string());
+    // Validate that an explicitly requested endpoint exists in config.
+    if cli.endpoint.is_some()
+        && endpoint_name != "<none>"
+        && !config.endpoints.contains_key(&endpoint_name)
+    {
+        return Err(anyhow!(CntxError::EndpointNotFound(endpoint_name)));
+    }
     let endpoint = endpoint_name
         .as_str()
         .ne("<none>")

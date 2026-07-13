@@ -16,26 +16,28 @@ CNTX is an open-source CLI that brings AI into your terminal.
 
 Built for developers, it provides a fast, lightweight interface for working with large language models while keeping context as token-efficient as possible.
 
+The CLI source lives in [`main/`](main/README.md). Install it with:
+
+```bash
+cargo install cntx
+```
+
 ---
 
 ## Features
 
 - Token-efficient context handling
 - Terminal-first workflow
-- Open source
+- Open source (MIT)
 - Support for OpenAI
 - Support for Anthropic
 - Support for Ollama Local
 - Support for Ollama Cloud
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/virajshoor/cntx
-cd cntx
-```
+- Sandboxed file writes
+- Model routing by prompt size
+- Interactive markdown chat
+- Session persistence and skills
+- Tool-use loop with read, write, edit, bash, glob, and grep
 
 ---
 
@@ -71,7 +73,7 @@ Contributions are welcome. If you'd like to improve CNTX, feel free to open an i
 
 ## License
 
-A license has not yet been selected.
+MIT
 
 ---
 

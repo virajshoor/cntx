@@ -26,7 +26,7 @@ impl Theme {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "light" | "light-mode" => Self::Light,
             _ => Self::Dark,
@@ -45,10 +45,13 @@ static CURRENT_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8:
 
 /// Set the active theme for markdown rendering.
 pub fn set_theme(theme: Theme) {
-    CURRENT_THEME.store(match theme {
-        Theme::Dark => 0,
-        Theme::Light => 1,
-    }, std::sync::atomic::Ordering::Relaxed);
+    CURRENT_THEME.store(
+        match theme {
+            Theme::Dark => 0,
+            Theme::Light => 1,
+        },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Get the current theme.

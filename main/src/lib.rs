@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod app;
 pub mod apply;
+pub mod blocklist;
 pub mod cli;
 pub mod config;
 pub mod context;

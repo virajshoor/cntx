@@ -220,30 +220,7 @@ fn visit_files(root: &Path, visitor: &mut dyn FnMut(&Path) -> Result<()>) -> Res
 }
 
 fn should_skip(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-        return true;
-    };
-    name.ends_with(".png")
-        || name.ends_with(".jpg")
-        || name.ends_with(".jpeg")
-        || name.ends_with(".gif")
-        || name.ends_with(".pdf")
-        || name.ends_with(".zip")
-        || name.ends_with(".lock")
-        || matches!(
-            name,
-            ".env"
-                | ".env.local"
-                | ".env.production"
-                | ".npmrc"
-                | ".pypirc"
-                | "secrets.yaml"
-                | "secrets.yml"
-                | "credentials"
-                | "credentials.json"
-                | "id_rsa"
-                | "id_ed25519"
-        )
+    crate::blocklist::should_skip(path)
 }
 
 fn read_context_prefix(path: &Path) -> Result<String> {

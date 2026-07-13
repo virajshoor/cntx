@@ -191,3 +191,7 @@ cargo build
 ## License
 
 MIT
+
+---
+
+<p align="center"><sub>Inspired by <a href="https://github.com/cntx-ai/headroom">Headroom</a> — context compression for AI agents.</sub></p>

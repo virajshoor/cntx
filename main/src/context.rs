@@ -180,24 +180,7 @@ fn read_prefix(path: &Path) -> std::io::Result<String> {
 }
 
 fn is_safe_context_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    let lower = name.to_lowercase();
-    !matches!(
-        lower.as_str(),
-        ".env"
-            | ".env.local"
-            | ".env.production"
-            | ".npmrc"
-            | ".pypirc"
-            | "secrets.yaml"
-            | "secrets.yml"
-            | "credentials"
-            | "credentials.json"
-            | "id_rsa"
-            | "id_ed25519"
-    )
+    !crate::blocklist::is_secret_file(path)
 }
 
 fn relative_path(root: &Path, path: &Path) -> PathBuf {

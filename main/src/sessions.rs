@@ -107,6 +107,17 @@ impl<'a> SessionStore<'a> {
         if session.id.trim().is_empty() {
             session.id = Uuid::new_v4().to_string();
         }
+        // If a session with the same ID already exists, generate a new ID to
+        // avoid silently overwriting the user's existing session.
+        let existing_path = self.path(&session.id);
+        if existing_path.exists() {
+            let old_id = session.id.clone();
+            session.id = Uuid::new_v4().to_string();
+            eprintln!(
+                "warning: session id '{}' already exists; imported with new id '{}'",
+                old_id, session.id
+            );
+        }
         self.save(&session)?;
         Ok(session)
     }

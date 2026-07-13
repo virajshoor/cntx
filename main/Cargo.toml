@@ -1,6 +1,6 @@
 [package]
 name = "cntx"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Cntx Code: BYOK, token-efficient AI coding assistant with built-in doc search and token saving"
 license = "MIT"
@@ -50,6 +50,7 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-m
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+wait-timeout = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

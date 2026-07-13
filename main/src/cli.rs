@@ -128,6 +128,11 @@ pub enum Command {
         fix: bool,
         #[arg(long, help = "Print diagnostics as JSON")]
         json: bool,
+        #[arg(
+            long,
+            help = "Run cargo fmt, clippy, test, and build, then report pass/fail"
+        )]
+        verify: bool,
     },
 }
 

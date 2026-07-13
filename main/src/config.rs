@@ -159,11 +159,30 @@ pub struct ModelAlias {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RoutingConfig {
     pub thresholds: RoutingThresholds,
     pub family_overrides: BTreeMap<String, BTreeMap<RouteSize, String>>,
     pub default_models: BTreeMap<String, String>,
+    /// Number of prior user/assistant turns from the current session to inject
+    /// into each new prompt. 0 disables history. Defaults to 10.
+    #[serde(default = "default_history_turns")]
+    pub history_turns: usize,
+}
+
+fn default_history_turns() -> usize {
+    10
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            thresholds: RoutingThresholds::default(),
+            family_overrides: BTreeMap::new(),
+            default_models: BTreeMap::new(),
+            history_turns: 10,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -256,6 +275,11 @@ impl ConfigStore {
 
     pub fn skills_dir(&self) -> PathBuf {
         self.root.join("skills")
+    }
+
+    /// Path to the persistent rustyline command history file.
+    pub fn history_path(&self) -> PathBuf {
+        self.root.join("history.txt")
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -425,7 +449,7 @@ impl McpServerConfig {
         let context7 = Self {
             name: "context7".to_string(),
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@upstash/context7-mcp".to_string()],
+            args: vec!["-y".to_string(), "@upstash/context7-mcp@3.2.3".to_string()],
             env: BTreeMap::new(),
             enabled: true,
             url: None,

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.0 - 2026-07-13
+
+- Load prior session turns into each new prompt so multi-turn conversation
+  context is preserved in the interactive shell. Bounded by
+  `config.routing.history_turns` (default 10).
+- Persist interactive shell command history across restarts via a
+  `history.txt` file in the config directory.
+- Activate skills: `/skill <name>` injects the skill's prompt as a system
+  message so reusable instructions shape model behavior for the session.
+- Harden the edit sandbox against symlink escapes. Reject writes through
+  symlinks that resolve outside the project root, with regression tests.
+- Add a 60-second timeout to tool-use shell commands. Hanging commands are
+  killed instead of freezing the CLI.
+- Exclude secret-named files (`.env`, `secrets.yaml`, `id_rsa`, etc.) from
+  grep and glob results to prevent credential leaks.
+- Pin the built-in Context7 MCP server to `@upstash/context7-mcp@3.2.3`
+  instead of fetching the latest version at runtime.
+- Add `doctor --verify` to run `cargo fmt`, `cargo clippy`, `cargo test`, and
+  `cargo build` and report pass/fail.
+- Validate that `cntx bench --endpoint` refers to an existing endpoint
+  instead of silently falling back to `<auto>`.
+- Generate a new session ID on import when the ID already exists, instead of
+  silently overwriting the existing session.
+- Extract shared apply logic into `Runtime::apply_files` to remove duplication
+  between normal and counsel prompt flows.
+- Unify the secret-file blocklist into a single `blocklist` module used by
+  context selection, the optimizer, and the tool-use loop.
+- Fix clippy and rustfmt violations that were failing the verification gate.
+- Add a GitHub Actions CI workflow that runs fmt, clippy, test, and build.
+- Clarify in MCP docs that the autonomous agent loop is not yet implemented.
+
 ## 0.2.1 - 2026-07-12
 
 - Fix Shift+Tab to dedent (remove indentation) instead of inserting a tab character.
