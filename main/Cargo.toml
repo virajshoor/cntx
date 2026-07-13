@@ -1,6 +1,6 @@
 [package]
 name = "cntx"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Cntx Code: BYOK, token-efficient AI coding assistant with built-in doc search and token saving"
 license = "MIT"
@@ -46,7 +46,7 @@ termimad = "0.34"
 serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }

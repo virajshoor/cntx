@@ -12,6 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
+use owo_colors::OwoColorize;
 use serde::Serialize;
 use wait_timeout::ChildExt;
 
@@ -729,6 +730,9 @@ pub async fn run_tool_loop(
             endpoint,
             request,
             &mut |delta| {
+                if crate::interactive::was_interrupted() {
+                    return;
+                }
                 response.push_str(&delta);
                 crate::ui::preview_update(&preview_buf, &delta);
             },
@@ -736,6 +740,12 @@ pub async fn run_tool_loop(
         .await?;
 
         crate::ui::preview_stop();
+
+        // Check if interrupted
+        if crate::interactive::was_interrupted() {
+            eprintln!("\n{}", "(interrupted)".dimmed());
+            return Ok(response);
+        }
 
         let tool_calls = parse_tool_calls(&response);
         if tool_calls.is_empty() {
@@ -785,12 +795,19 @@ pub async fn run_tool_loop(
     let preview_buf = crate::ui::preview_start();
 
     crate::providers::stream_chat_with_retry(adapter.as_ref(), endpoint, request, &mut |delta| {
+        if crate::interactive::was_interrupted() {
+            return;
+        }
         response.push_str(&delta);
         crate::ui::preview_update(&preview_buf, &delta);
     })
     .await?;
 
     crate::ui::preview_stop();
+
+    if crate::interactive::was_interrupted() {
+        eprintln!("\n{}", "(interrupted)".dimmed());
+    }
 
     Ok(response)
 }

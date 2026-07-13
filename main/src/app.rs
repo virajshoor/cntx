@@ -212,6 +212,14 @@ impl Runtime {
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
         // Initialize theme from config
         ui::set_theme(ui::Theme::parse(&self.config.ui.theme));
+        // Mark that a prompt is running so Ctrl+C interrupts instead of quitting.
+        crate::interactive::set_prompt_running(true);
+        let result = self.run_prompt_inner(prompt).await;
+        crate::interactive::set_prompt_running(false);
+        result
+    }
+
+    async fn run_prompt_inner(&mut self, prompt: &str) -> Result<()> {
         let scan_project = has_project_marker(self.sandbox.project_root());
         let prompt_input =
             build_prompt_input_with_scan(prompt, self.sandbox.project_root(), scan_project);
@@ -354,12 +362,22 @@ impl Runtime {
             endpoint,
             request,
             &mut |delta| {
+                if crate::interactive::was_interrupted() {
+                    return;
+                }
                 assistant_text.push_str(&delta);
                 ui::preview_update(&preview_buf, &delta);
             },
         )
         .await;
         ui::preview_stop();
+        if crate::interactive::was_interrupted() {
+            eprintln!(
+                "\n{}",
+                "(interrupted — partial response shown above)".dimmed()
+            );
+            return Ok(assistant_text);
+        }
         result?;
         Ok(assistant_text)
     }

@@ -11,27 +11,64 @@ use crate::permissions::Mode;
 use crate::permissions::Operation;
 use crate::sandbox::SandboxVerdict;
 
-/// Event handler for Shift+Tab: sets a flag and immediately accepts (returns)
-/// the line so the readline loop can detect it and cycle the permission mode.
-/// This mimics how Claude Code uses Shift+Tab to cycle modes.
 struct ShiftTabHandler;
 
 impl ConditionalEventHandler for ShiftTabHandler {
     fn handle(&self, _evt: &Event, _n: u16, _positive: bool, _ctx: &EventContext) -> Option<Cmd> {
-        // Set the flag so the readline loop knows to cycle the mode.
         SHIFT_TAB_PRESSED.store(true, Ordering::SeqCst);
-        // Accept the current line (like pressing Enter) so readline returns
-        // immediately.
         Some(Cmd::AcceptLine)
     }
 }
 
-/// Thread-local flag set by the Shift+Tab handler so the readline loop knows
-/// to cycle the mode instead of treating the empty line as a no-op.
 use std::sync::atomic::{AtomicBool, Ordering};
+
 static SHIFT_TAB_PRESSED: AtomicBool = AtomicBool::new(false);
 
+/// Set when Ctrl+C is pressed during generation. The streaming loop checks
+/// this and breaks out early, returning whatever text was generated so far.
+pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// True when a prompt is currently running. Used to distinguish "interrupt"
+/// (first Ctrl+C while generating) from "quit" (Ctrl+C while idle).
+static PROMPT_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Returns true if a prompt is currently running.
+pub fn is_prompt_running() -> bool {
+    PROMPT_RUNNING.load(Ordering::SeqCst)
+}
+
+/// Set the prompt-running flag. Called by `run_prompt` before generation starts.
+pub fn set_prompt_running(running: bool) {
+    PROMPT_RUNNING.store(running, Ordering::SeqCst);
+    if running {
+        INTERRUPTED.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Returns true if the current generation was interrupted by Ctrl+C.
+pub fn was_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
+/// Spawn a background task that listens for Ctrl+C. When a prompt is running,
+/// the first Ctrl+C sets the interrupt flag. When idle, Ctrl+C is handled by
+/// rustyline (which returns an Interrupted error).
+pub fn spawn_ctrl_c_handler() {
+    tokio::spawn(async {
+        loop {
+            tokio::signal::ctrl_c().await.ok();
+            if PROMPT_RUNNING.load(Ordering::SeqCst) {
+                INTERRUPTED.store(true, Ordering::SeqCst);
+            }
+            // If not running, rustyline's readline will get the SIGINT and
+            // return an error, which our loop handles by quitting.
+        }
+    });
+}
+
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
+    // Spawn background Ctrl+C handler for interrupting generation.
+    spawn_ctrl_c_handler();
     // Configure the editor: emacs mode.
     let config = ConfigBuilder::new().edit_mode(EditMode::Emacs).build();
     let mut editor = DefaultEditor::with_config(config)?;
@@ -52,7 +89,19 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
     ui_line("Press Shift+Tab to cycle permission modes.");
 
     loop {
-        let line = editor.readline(&prompt(runtime))?;
+        let line = match editor.readline(&prompt(runtime)) {
+            Ok(line) => line,
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                // Ctrl+C while idle at the prompt: quit.
+                println!();
+                break;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                // Ctrl+D: quit.
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         // Check if Shift+Tab was pressed (the handler accepted the line).
         if SHIFT_TAB_PRESSED.swap(false, Ordering::SeqCst) {
@@ -73,7 +122,27 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
             continue;
         }
 
-        runtime.run_prompt(input).await?;
+        // Support message queueing: prompts separated by ` && ` are processed
+        // in sequence. Each is treated as a separate conversation turn.
+        let prompts: Vec<&str> = input.split(" && ").collect();
+        for queued in prompts {
+            let queued = queued.trim();
+            if queued.is_empty() {
+                continue;
+            }
+            if queued.starts_with('/') {
+                if handle_slash(runtime, queued).await? {
+                    break;
+                }
+                continue;
+            }
+            runtime.run_prompt(queued).await?;
+            // If the prompt was interrupted, don't process the rest of the queue.
+            if was_interrupted() {
+                println!("{}", "(interrupted)".dimmed());
+                break;
+            }
+        }
     }
 
     // Persist command history for the next session.
@@ -151,6 +220,8 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/help` - show this help\n\
 - `/status` - show endpoint, model, mode, sandbox, and apply state\n\
 - `/mode` - show the active permission mode\n\
+- `/model <model>` - switch the model for this session (e.g. `/model gpt-4o`)\n\
+- `/model` - show the current model\n\
 - `/effort [low|medium|high]` - show or set investigation and verification depth\n\
 - `/clear` - start a fresh conversation session\n\
 - `/compact` - summarize the conversation so far and start a fresh context\n\
@@ -163,7 +234,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/sandbox` - show the edit sandbox policy\n\
 - `/mcp` - list MCP servers\n\
 - `/api-keys` - list stored API keys, masked\n\
-- `/default <model-or-alias>` - set the default model for this session\n\
+- `/default <model-or-alias>` - set the persistent default model\n\
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
 - `/dry-run` - toggle apply previews without file writes\n\
 - `/checklist` - show the files from the last apply run\n\
@@ -333,6 +404,20 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
                     let key = secrets.get(provider).unwrap_or_default();
                     println!("{}", crate::api_keys::ApiSecrets::masked(provider, key));
                 }
+            }
+            Ok(false)
+        }
+        Some("/model") => {
+            if let Some(value) = parts.get(1).copied() {
+                runtime.model_override = Some(value.to_string());
+                println!("model set to {value} for this session");
+            } else {
+                let current = runtime
+                    .model_override
+                    .as_deref()
+                    .or(runtime.config.default_model.as_deref())
+                    .unwrap_or("auto");
+                println!("model: {current}");
             }
             Ok(false)
         }

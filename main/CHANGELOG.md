@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 - 2026-07-13
+
+- Add `/model <model>` slash command to switch the model for the current
+  session (e.g. `/model glm-5.2:cloud`).
+- Add Ctrl+C interrupt: first Ctrl+C while a prompt is generating stops the
+  generation and shows the partial response; second Ctrl+C (while idle) quits.
+- Add message queueing: separate multiple prompts with ` && ` to process them
+  in sequence (e.g. `fix the bug && run the tests`).
+
 ## 0.5.0 - 2026-07-13
 
 - Add retry with exponential backoff (3 attempts, 1s/2s/4s) on transient
