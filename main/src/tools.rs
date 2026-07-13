@@ -713,22 +713,16 @@ pub async fn run_tool_loop(
         };
 
         let mut response = String::new();
-        let mut first_token = true;
-        let thinking = crate::ui::thinking_start();
+        let preview_buf = crate::ui::preview_start();
 
         adapter
             .stream_chat(endpoint, request, &mut |delta| {
-                if first_token {
-                    first_token = false;
-                    crate::ui::thinking_stop(thinking.clone());
-                }
                 response.push_str(&delta);
+                crate::ui::preview_update(&preview_buf, &delta);
             })
             .await?;
 
-        if first_token {
-            crate::ui::thinking_stop(thinking);
-        }
+        crate::ui::preview_stop();
 
         let tool_calls = parse_tool_calls(&response);
         if tool_calls.is_empty() {
@@ -772,22 +766,16 @@ pub async fn run_tool_loop(
     };
 
     let mut response = String::new();
-    let mut first_token = true;
-    let thinking = crate::ui::thinking_start();
+    let preview_buf = crate::ui::preview_start();
 
     adapter
         .stream_chat(endpoint, request, &mut |delta| {
-            if first_token {
-                first_token = false;
-                crate::ui::thinking_stop(thinking.clone());
-            }
             response.push_str(&delta);
+            crate::ui::preview_update(&preview_buf, &delta);
         })
         .await?;
 
-    if first_token {
-        crate::ui::thinking_stop(thinking);
-    }
+    crate::ui::preview_stop();
 
     Ok(response)
 }

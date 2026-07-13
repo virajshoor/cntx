@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3 - 2026-07-13
+
+- Fix sandbox blocking writes and shell in interactive mode: the sandbox's
+  internal PermissionPolicy was still using Auto mode even when the runtime
+  mode was overridden to Allow. Now the sandbox is built with the correct
+  effective mode so the model can actually write files and run commands.
+- Replace the "thinking..." dot animation with a live preview of the last
+  ~80 characters of streamed output, like Claude Code. You can see the
+  model's response as it generates instead of just dots.
+
 ## 0.3.2 - 2026-07-13
 
 - Fix sandbox blocking in interactive mode: default to allow mode so the model

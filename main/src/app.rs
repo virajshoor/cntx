@@ -90,25 +90,26 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         None => {
             let prompt = cli.prompt.join(" ");
-            let sandbox = build_sandbox(&cli);
-            // In interactive mode, enable tool-use by default and use allow
-            // mode so the model can actually write files and run commands
-            // without being blocked by the sandbox permission prompt (which
-            // has no interactive path in the tool-use loop).
             let interactive = prompt.trim().is_empty();
-            let interactive_tool_use = cli.tool_use || interactive;
-            let interactive_mode = if interactive && cli.mode == Mode::Auto {
+            // In interactive mode, use allow mode so the model can write files
+            // and run shell commands without being blocked by the sandbox
+            // permission prompt (which has no interactive path in the tool-use
+            // loop). The sandbox must be built with the correct mode so its
+            // internal PermissionPolicy matches.
+            let effective_mode = if interactive && cli.mode == Mode::Auto {
                 Mode::Allow
             } else {
                 cli.mode
             };
+            let sandbox = build_sandbox_with_mode(&cli, effective_mode);
+            let interactive_tool_use = cli.tool_use || interactive;
             let mut runtime = Runtime::new(
                 config,
                 store,
                 RuntimeOptions {
                     endpoint_override: cli.endpoint,
                     model_override: cli.model,
-                    mode: interactive_mode,
+                    mode: effective_mode,
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,
@@ -293,26 +294,19 @@ impl Runtime {
         Ok(())
     }
 
-    /// Run a chat request, showing a thinking indicator while the model
-    /// generates. Returns the full assistant text.
+    /// Run a chat request, showing a live preview of streamed tokens while the
+    /// model generates. Returns the full assistant text.
     async fn generate(&self, endpoint: &EndpointConfig, request: ChatRequest) -> Result<String> {
-        let thinking = ui::thinking_start();
+        let preview_buf = ui::preview_start();
         let mut assistant_text = String::new();
-        let mut first_token = true;
         let adapter = adapter_for(endpoint.provider.clone());
         let result = adapter
             .stream_chat(endpoint, request, &mut |delta| {
-                if first_token {
-                    first_token = false;
-                    ui::thinking_stop(thinking.clone());
-                }
                 assistant_text.push_str(&delta);
+                ui::preview_update(&preview_buf, &delta);
             })
             .await;
-        // If no tokens arrived (error or empty response), stop thinking
-        if first_token {
-            ui::thinking_stop(thinking);
-        }
+        ui::preview_stop();
         result?;
         Ok(assistant_text)
     }
@@ -1624,11 +1618,15 @@ fn resolve_alias_or_model(config: &AppConfig, value: &str) -> Result<String> {
 
 /// Build the active edit sandbox from CLI safety flags and the project root.
 fn build_sandbox(cli: &Cli) -> Sandbox {
+    build_sandbox_with_mode(cli, cli.mode)
+}
+
+fn build_sandbox_with_mode(cli: &Cli, mode: Mode) -> Sandbox {
     let root = project_root();
     if cli.dangerously_disable_sandbox {
-        return Sandbox::disabled(cli.mode, root);
+        return Sandbox::disabled(mode, root);
     }
-    Sandbox::new(cli.mode, root, cli.allow_write.clone())
+    Sandbox::new(mode, root, cli.allow_write.clone())
 }
 
 fn handle_sandbox(cli: &Cli, config: &AppConfig, yaml: bool) -> Result<()> {

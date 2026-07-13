@@ -119,6 +119,41 @@ pub fn thinking_stop(done: Arc<AtomicBool>) {
     thread::sleep(Duration::from_millis(50));
 }
 
+/// Show a live preview of the last N characters of the stream as it arrives.
+/// Call `preview_start()` to get the shared buffer, then `preview_update(buf, text)`
+/// to push new text, and `preview_stop()` to clear the line.
+pub fn preview_start() -> Arc<std::sync::Mutex<String>> {
+    Arc::new(std::sync::Mutex::new(String::new()))
+}
+
+/// Update the live preview line with the latest streamed text.
+/// Shows the last ~80 characters of `text` on a single line, overwriting
+/// the previous preview. Call this from the streaming callback.
+pub fn preview_update(buf: &Arc<std::sync::Mutex<String>>, text: &str) {
+    if let Ok(mut inner) = buf.lock() {
+        inner.push_str(text);
+        let display: String = inner
+            .chars()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        // Collapse newlines for single-line display
+        let display = display.replace('\n', " ").replace('\r', "");
+        print!("\r{}", " ".repeat(100));
+        print!("\r{}", display.dimmed());
+        std::io::stdout().flush().ok();
+    }
+}
+
+/// Clear the live preview line.
+pub fn preview_stop() {
+    print!("\r{}\r", " ".repeat(100));
+    std::io::stdout().flush().ok();
+}
+
 /// Render markdown text to the terminal. Used for assistant responses so that
 /// `**bold**`, headers, lists, and code blocks render instead of showing raw
 /// markdown punctuation. Adapts colors to the current theme (dark/light).
