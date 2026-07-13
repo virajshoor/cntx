@@ -150,9 +150,32 @@ pub struct Runtime {
     pub sandbox: Sandbox,
     pub session: Session,
     pub last_apply_outcomes: Vec<crate::apply::ApplyOutcome>,
-    /// When set, the named skill's prompt is prepended to each prompt as a
-    /// system message so reusable instructions shape the model's behavior.
     pub active_skill: Option<crate::skills::Skill>,
+    /// Running cost estimate for the current session (USD cents).
+    pub cost_tracker: CostTracker,
+}
+
+/// Tracks estimated token usage and cost for a session.
+#[derive(Clone, Debug, Default)]
+pub struct CostTracker {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub request_count: usize,
+}
+
+impl CostTracker {
+    pub fn add(&mut self, input: usize, output: usize) {
+        self.input_tokens += input;
+        self.output_tokens += output;
+        self.request_count += 1;
+    }
+
+    pub fn estimated_cost_usd(&self) -> f64 {
+        // Rough blended rate: $3/M input, $15/M output (weighted average)
+        let input_cost = self.input_tokens as f64 * 3.0 / 1_000_000.0;
+        let output_cost = self.output_tokens as f64 * 15.0 / 1_000_000.0;
+        input_cost + output_cost
+    }
 }
 
 pub struct RuntimeOptions {
@@ -182,6 +205,7 @@ impl Runtime {
             session: Session::new("interactive"),
             last_apply_outcomes: Vec::new(),
             active_skill: None,
+            cost_tracker: CostTracker::default(),
         })
     }
 
@@ -300,6 +324,11 @@ impl Runtime {
 
         self.session.push("user", prompt);
         let assistant_text = self.generate(&endpoint, request).await?;
+        // Track estimated cost: input ~ optimized prompt, output ~ response
+        self.cost_tracker.add(
+            optimized.report.estimated_tokens,
+            estimate_output_tokens(&assistant_text),
+        );
         ui::print_markdown(&assistant_text);
         println!();
 
@@ -312,16 +341,24 @@ impl Runtime {
 
     /// Run a chat request, showing a live preview of streamed tokens while the
     /// model generates. Returns the full assistant text.
-    async fn generate(&self, endpoint: &EndpointConfig, request: ChatRequest) -> Result<String> {
+    pub async fn generate(
+        &self,
+        endpoint: &EndpointConfig,
+        request: ChatRequest,
+    ) -> Result<String> {
         let preview_buf = ui::preview_start();
         let mut assistant_text = String::new();
         let adapter = adapter_for(endpoint.provider.clone());
-        let result = adapter
-            .stream_chat(endpoint, request, &mut |delta| {
+        let result = crate::providers::stream_chat_with_retry(
+            adapter.as_ref(),
+            endpoint,
+            request,
+            &mut |delta| {
                 assistant_text.push_str(&delta);
                 ui::preview_update(&preview_buf, &delta);
-            })
-            .await;
+            },
+        )
+        .await;
         ui::preview_stop();
         result?;
         Ok(assistant_text)
@@ -2155,6 +2192,13 @@ fn find_project_marker(start: &Path) -> Option<PathBuf> {
 /// to avoid walking an entire home directory or other large tree.
 fn has_project_marker(root: &Path) -> bool {
     root.join(".git").exists() || root.join(".cntx").exists()
+}
+
+/// Rough token estimate for output text (chars/4 or words, whichever is more).
+fn estimate_output_tokens(text: &str) -> usize {
+    let chars = text.chars().count();
+    let words = text.split_whitespace().count();
+    chars.div_ceil(4).max(words)
 }
 
 #[cfg(test)]

@@ -78,6 +78,64 @@ pub fn adapter_for(provider: ProviderKind) -> Box<dyn ProviderAdapter> {
     }
 }
 
+/// Maximum retry attempts for transient provider errors.
+const MAX_RETRIES: u32 = 3;
+
+/// Initial backoff delay in milliseconds.
+const INITIAL_BACKOFF_MS: u64 = 1_000;
+
+/// Stream a chat request with retry/backoff on transient errors (429, 500,
+/// 502, 503, 504, connection failures). Non-retryable errors are returned
+/// immediately.
+pub async fn stream_chat_with_retry(
+    adapter: &dyn ProviderAdapter,
+    endpoint: &EndpointConfig,
+    request: ChatRequest,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> Result<()> {
+    let mut backoff = INITIAL_BACKOFF_MS;
+    for attempt in 0..=MAX_RETRIES {
+        match adapter
+            .stream_chat(endpoint, request.clone(), on_delta)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_RETRIES && is_retryable_error(&e) => {
+                eprintln!(
+                    "  retrying in {}s (attempt {}/{})",
+                    backoff / 1000,
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(Duration::from_millis(backoff)).await;
+                backoff *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Returns true when the error looks like a transient provider issue worth
+/// retrying (rate limit, server error, connection timeout).
+fn is_retryable_error(error: &anyhow::Error) -> bool {
+    let msg = error.to_string().to_lowercase();
+    msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+        || msg.contains("internal server error")
+        || msg.contains("bad gateway")
+        || msg.contains("service unavailable")
+        || msg.contains("gateway timeout")
+        || msg.contains("connection")
+        || msg.contains("timeout")
+        || msg.contains("timed out")
+        || msg.contains("reset")
+}
+
 fn client(endpoint: &EndpointConfig) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(endpoint.timeout_secs))

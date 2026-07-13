@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 - 2026-07-13
+
+- Add retry with exponential backoff (3 attempts, 1s/2s/4s) on transient
+  provider errors (429, 500, 502, 503, 504, connection failures, timeouts).
+- Add tool-call progress display: shows `reading src/main.rs...`,
+  `writing script.py...`, `running: python script.py...` etc. as the model
+  executes tools.
+- Add `/compact` command: summarizes the conversation so far via a model call
+  and replaces old turns with a summary + last 2 turns, keeping context fresh.
+- Add `/cost` command: shows estimated input/output tokens, request count, and
+  cost for the current session.
+- Add `@directory/` references: `@src/` includes a compact file tree summary
+  (max 60 entries, depth 3) instead of failing to read a directory as a file.
+- Add project instructions loading: `AGENTS.md` and `.cntx/instructions.md` are
+  automatically injected as context so project-specific conventions persist.
+- Add git-aware context: `git diff --stat` output is included automatically
+  when inside a git repo with uncommitted changes.
+- Track per-session token usage and estimated cost in a `CostTracker`.
+
 ## 0.4.0 - 2026-07-13
 
 - Add configurable effort levels. Use `/effort low`, `/effort medium`, or

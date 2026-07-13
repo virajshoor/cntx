@@ -201,3 +201,18 @@ pub fn print_refresh_report(report: &RefreshReport) {
 pub fn muted(value: impl AsRef<str>) -> String {
     value.as_ref().dimmed().to_string()
 }
+
+/// Print a tool-call progress line.
+pub fn print_tool_progress(label: &str) {
+    eprintln!("  {} {}", "~".cyan(), label.dimmed());
+}
+
+/// Print a tool-call completion marker.
+pub fn print_tool_done(label: &str, is_error: bool) {
+    let mark: String = if is_error {
+        "FAIL".red().to_string()
+    } else {
+        "ok".green().to_string()
+    };
+    eprintln!("  {} [{}] {}", "~".cyan(), mark, label.dimmed());
+}

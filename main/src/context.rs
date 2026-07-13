@@ -73,10 +73,38 @@ pub fn build_prompt_input_with_scan(prompt: &str, root: &Path, scan_project: boo
         sections.push(format!("Project memory:\n{memory}"));
     }
 
+    if let Some(instructions) = read_project_instructions(root) {
+        sections.push(format!("Project instructions:\n{instructions}"));
+    }
+
+    // Include a git diff summary when inside a git repo.
+    if let Some(diff) = read_git_diff_summary(root) {
+        sections.push(format!("Current git changes:\n{diff}"));
+    }
+
     let mut seen = BTreeSet::new();
     for path in referenced_paths(prompt) {
         if report.files.len() >= CONTEXT_FILE_LIMIT {
             break;
+        }
+        // Handle @directory/ references: include a file tree summary.
+        let full = root.join(&path);
+        if full.is_dir() {
+            if let Some(tree) = directory_tree(&full, root) {
+                seen.insert(path.clone());
+                report.files.push(PromptContextFile {
+                    path: path.clone(),
+                    score: usize::MAX,
+                    excerpt_chars: tree.chars().count(),
+                    source: ContextSource::Reference,
+                });
+                sections.push(format!(
+                    "Directory tree `{}`:\n```text\n{}\n```",
+                    path.display(),
+                    tree
+                ));
+            }
+            continue;
         }
         if let Some((relative, excerpt)) = read_context_file(root, &path) {
             seen.insert(relative.clone());
@@ -150,6 +178,45 @@ fn read_project_memory(root: &Path) -> Option<String> {
     Some(trim_chars(trimmed, MAX_MEMORY_CHARS))
 }
 
+/// Read project-level instructions from AGENTS.md or .cntx/instructions.md.
+/// These are injected as a system-like section so the model follows
+/// project-specific conventions.
+fn read_project_instructions(root: &Path) -> Option<String> {
+    const MAX_INSTRUCTIONS_CHARS: usize = 4_000;
+    for path in [
+        root.join("AGENTS.md"),
+        root.join(".cntx").join("instructions.md"),
+    ] {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(trim_chars(trimmed, MAX_INSTRUCTIONS_CHARS));
+            }
+        }
+    }
+    None
+}
+
+/// Run `git diff --stat` in the project root and return the output as a
+/// short summary. Returns None when not in a git repo or no changes.
+fn read_git_diff_summary(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("diff")
+        .arg("--stat")
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trim_chars(trimmed, 2_000))
+}
+
 fn referenced_paths(prompt: &str) -> Vec<PathBuf> {
     prompt
         .split_whitespace()
@@ -162,6 +229,68 @@ fn referenced_paths(prompt: &str) -> Vec<PathBuf> {
 
 fn reference_trim_char(ch: char) -> bool {
     matches!(ch, ',' | '.' | ':' | ';' | ')' | ']' | '}' | '\'' | '"')
+}
+
+/// Build a compact file tree for a directory, limited to ~60 entries and
+/// depth 3. Excludes common ignored directories.
+fn directory_tree(dir: &Path, root: &Path) -> Option<String> {
+    const MAX_ENTRIES: usize = 60;
+    const MAX_DEPTH: usize = 3;
+    let mut lines = Vec::new();
+    collect_tree(dir, root, 0, MAX_DEPTH, MAX_ENTRIES, &mut lines);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
+fn collect_tree(
+    dir: &Path,
+    _root: &Path,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+    lines: &mut Vec<String>,
+) {
+    if depth > max_depth || lines.len() >= max_entries {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    items.sort_by_key(|e| e.file_name());
+    for entry in items {
+        if lines.len() >= max_entries {
+            return;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if matches!(
+            name_str.as_ref(),
+            ".git"
+                | "target"
+                | "node_modules"
+                | "dist"
+                | "build"
+                | "coverage"
+                | ".cache"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+        ) {
+            continue;
+        }
+        let indent = "  ".repeat(depth);
+        let path = entry.path();
+        if path.is_dir() {
+            lines.push(format!("{indent}{}/", name_str));
+            collect_tree(&path, _root, depth + 1, max_depth, max_entries, lines);
+        } else {
+            lines.push(format!("{indent}{name_str}"));
+        }
+    }
 }
 
 fn read_context_file(root: &Path, requested: &Path) -> Option<(PathBuf, String)> {

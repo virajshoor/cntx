@@ -724,12 +724,16 @@ pub async fn run_tool_loop(
         let mut response = String::new();
         let preview_buf = crate::ui::preview_start();
 
-        adapter
-            .stream_chat(endpoint, request, &mut |delta| {
+        crate::providers::stream_chat_with_retry(
+            adapter.as_ref(),
+            endpoint,
+            request,
+            &mut |delta| {
                 response.push_str(&delta);
                 crate::ui::preview_update(&preview_buf, &delta);
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         crate::ui::preview_stop();
 
@@ -747,12 +751,15 @@ pub async fn run_tool_loop(
 
         // Execute each tool call and add results
         for call in &tool_calls {
+            let progress = tool_call_progress(&call.name, &call.arguments);
+            crate::ui::print_tool_progress(&progress);
             let result = execute_tool(call, sandbox, project_root);
             let result_text = if result.is_error {
                 format!("Error: {}", result.output)
             } else {
                 result.output
             };
+            crate::ui::print_tool_done(&progress, result.is_error);
             messages.push(crate::providers::ChatMessage {
                 role: "user".to_string(),
                 content: format!("Tool result for '{}':\n{}", call.name, result_text),
@@ -777,14 +784,54 @@ pub async fn run_tool_loop(
     let mut response = String::new();
     let preview_buf = crate::ui::preview_start();
 
-    adapter
-        .stream_chat(endpoint, request, &mut |delta| {
-            response.push_str(&delta);
-            crate::ui::preview_update(&preview_buf, &delta);
-        })
-        .await?;
+    crate::providers::stream_chat_with_retry(adapter.as_ref(), endpoint, request, &mut |delta| {
+        response.push_str(&delta);
+        crate::ui::preview_update(&preview_buf, &delta);
+    })
+    .await?;
 
     crate::ui::preview_stop();
 
     Ok(response)
+}
+
+/// Build a human-readable progress label for a tool call.
+fn tool_call_progress(name: &str, arguments: &serde_json::Value) -> String {
+    match name {
+        "read" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("reading {path}")
+        }
+        "write" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("writing {path}")
+        }
+        "edit" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("editing {path}")
+        }
+        "bash" => {
+            let cmd = arguments
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let short = cmd.chars().take(60).collect::<String>();
+            format!("running: {short}")
+        }
+        "glob" => {
+            let pattern = arguments
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("globbing {pattern}")
+        }
+        "grep" => {
+            let pattern = arguments
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("searching for '{pattern}'")
+        }
+        _ => format!("calling {name}"),
+    }
 }

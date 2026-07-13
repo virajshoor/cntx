@@ -153,6 +153,8 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/mode` - show the active permission mode\n\
 - `/effort [low|medium|high]` - show or set investigation and verification depth\n\
 - `/clear` - start a fresh conversation session\n\
+- `/compact` - summarize the conversation so far and start a fresh context\n\
+- `/cost` - show estimated token usage and cost for this session\n\
 - `/models` - list cached models and aliases\n\
 - `/endpoints` - list endpoints\n\
 - `/skills` - list skills\n\
@@ -202,6 +204,71 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             runtime.session = crate::sessions::Session::new("interactive");
             runtime.last_apply_outcomes.clear();
             println!("started a fresh session: {}", runtime.session.id);
+            Ok(false)
+        }
+        Some("/compact") => {
+            let msg_count = runtime.session.messages.len();
+            if msg_count <= 4 {
+                println!("nothing to compact; only {msg_count} messages in this session");
+                return Ok(false);
+            }
+            // Keep the last 2 turns (4 messages) and summarize the rest.
+            let to_summarize: Vec<_> = runtime.session.messages[..msg_count - 4]
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}: {}",
+                        m.role,
+                        m.content.chars().take(500).collect::<String>()
+                    )
+                })
+                .collect();
+            let summary_prompt = format!(
+                "Summarize the following conversation in 3-5 bullet points. Keep key decisions, file names, and context:\n\n{}",
+                to_summarize.join("\n\n")
+            );
+            // Do a quick model call to summarize.
+            let endpoint_name = runtime.config.primary_endpoint.clone().unwrap_or_default();
+            let endpoint = runtime.config.endpoints.get(&endpoint_name).cloned();
+            if let Some(endpoint) = endpoint {
+                let model = runtime
+                    .model_override
+                    .clone()
+                    .or_else(|| runtime.config.default_model.clone())
+                    .unwrap_or_else(|| endpoint.default_model.clone().unwrap_or_default());
+                let request = crate::providers::ChatRequest {
+                    model,
+                    messages: vec![crate::providers::ChatMessage {
+                        role: "user".to_string(),
+                        content: summary_prompt,
+                    }],
+                    max_tokens: Some(512),
+                };
+                println!("compacting {} messages...", msg_count - 4);
+                let summary = runtime.generate(&endpoint, request).await?;
+                let last_messages = runtime.session.messages[msg_count - 4..].to_vec();
+                runtime.session = crate::sessions::Session::new("interactive");
+                runtime.session.push(
+                    "system",
+                    format!("Previous conversation summary:\n{summary}"),
+                );
+                for msg in last_messages {
+                    runtime.session.push(&msg.role, &msg.content);
+                }
+                crate::sessions::SessionStore::new(&runtime.store).save(&runtime.session)?;
+                println!("compacted to {} messages", runtime.session.messages.len());
+            } else {
+                println!("no endpoint configured; cannot compact");
+            }
+            Ok(false)
+        }
+        Some("/cost") => {
+            let ct = &runtime.cost_tracker;
+            println!("requests:    {}", ct.request_count);
+            println!("input tokens:  {}", ct.input_tokens);
+            println!("output tokens: {}", ct.output_tokens);
+            println!("total tokens:  {}", ct.input_tokens + ct.output_tokens);
+            println!("est. cost:    ${:.4}", ct.estimated_cost_usd());
             Ok(false)
         }
         Some("/models") => {
