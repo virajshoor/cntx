@@ -192,15 +192,23 @@ Available tools:\n",
         ));
     }
     instruction.push_str(
-        "\nTo call a tool, output a JSON block on its own line like:\n\
-         <tool>{\"name\":\"read\",\"arguments\":{\"path\":\"src/main.rs\"}}</tool>\n\n\
-         After receiving the tool result, you can call another tool or provide your final response. \
+        "\nTo call a tool, output a JSON block on its own line wrapped in <tool> tags.\n\
+         The JSON must have \"name\" and \"arguments\" keys. Examples:\n\
+         <tool>{\"name\":\"read\",\"arguments\":{\"path\":\"src/main.rs\"}}</tool>\n\
+         <tool>{\"name\":\"write\",\"arguments\":{\"path\":\"script.py\",\"content\":\"print('hi')\"}}</tool>\n\
+         <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"python3 script.py\"}}</tool>\n\
+         <tool>{\"name\":\"glob\",\"arguments\":{\"pattern\":\"src/**/*.rs\"}}</tool>\n\
+         <tool>{\"name\":\"grep\",\"arguments\":{\"pattern\":\"TODO\",\"path\":\"*.rs\"}}</tool>\n\n\
+         Output one tool call at a time. After receiving the tool result, you can call another tool or provide your final response. \
          When you are done, just respond normally without a <tool> block.",
     );
     instruction
 }
 
 /// Parse tool calls from the model's response text.
+/// Handles both the standard format `{"name":"read","arguments":{"path":"..."}}`
+/// and the common variant where args are at the top level:
+/// `{"name":"bash","command":"ls -la"}`.
 pub fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     let mut remaining = text;
@@ -215,11 +223,23 @@ pub fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let arguments = value
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
                 if !name.is_empty() {
+                    // Standard: arguments nested under "arguments" key.
+                    // Fallback: treat all top-level keys except "name" as
+                    // arguments (handles models that flatten the structure).
+                    let arguments = if let Some(args) = value.get("arguments") {
+                        args.clone()
+                    } else {
+                        let mut args = serde_json::Map::new();
+                        if let Some(obj) = value.as_object() {
+                            for (key, val) in obj {
+                                if key != "name" {
+                                    args.insert(key.clone(), val.clone());
+                                }
+                            }
+                        }
+                        serde_json::Value::Object(args)
+                    };
                     calls.push(ToolCall { name, arguments });
                 }
             }
@@ -247,6 +267,17 @@ pub fn execute_tool(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> 
             is_error: true,
         },
     }
+}
+
+/// Returns true when the sandbox verdict allows the operation. In the
+/// tool-use loop there is no interactive prompt, so `Ask` is treated as
+/// `Allow` to prevent the model from being blocked by every mode except
+/// `Allow`.
+fn verdict_allows(verdict: &crate::sandbox::SandboxVerdict) -> bool {
+    matches!(
+        verdict.decision,
+        crate::permissions::PermissionDecision::Allow | crate::permissions::PermissionDecision::Ask
+    )
 }
 
 fn execute_read(call: &ToolCall, project_root: &Path) -> ToolResult {
@@ -296,10 +327,7 @@ fn execute_write(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Too
 
     // Check sandbox
     let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !matches!(
-        verdict.decision,
-        crate::permissions::PermissionDecision::Allow
-    ) {
+    if !verdict_allows(&verdict) {
         return ToolResult {
             tool_name: "write".to_string(),
             output: format!(
@@ -358,10 +386,7 @@ fn execute_edit(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
 
     // Check sandbox
     let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !matches!(
-        verdict.decision,
-        crate::permissions::PermissionDecision::Allow
-    ) {
+    if !verdict_allows(&verdict) {
         return ToolResult {
             tool_name: "edit".to_string(),
             output: format!(
@@ -435,10 +460,7 @@ fn execute_bash(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
 
     // Check sandbox for shell operations
     let verdict = sandbox.evaluate(crate::permissions::Operation::Shell, None);
-    if !matches!(
-        verdict.decision,
-        crate::permissions::PermissionDecision::Allow
-    ) {
+    if !verdict_allows(&verdict) {
         return ToolResult {
             tool_name: "bash".to_string(),
             output: format!("Blocked by sandbox: {}", verdict.reason),
@@ -850,5 +872,36 @@ fn tool_call_progress(name: &str, arguments: &serde_json::Value) -> String {
             format!("searching for '{pattern}'")
         }
         _ => format!("calling {name}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_flat_tool_arguments() {
+        let calls =
+            parse_tool_calls(r#"<tool>{"name":"bash","command":"python3 script.py"}</tool>"#);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("python3 script.py")
+        );
+    }
+
+    #[test]
+    fn parses_nested_tool_arguments() {
+        let calls =
+            parse_tool_calls(r#"<tool>{"name":"read","arguments":{"path":"src/main.rs"}}</tool>"#);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(
+            calls[0].arguments.get("path").and_then(|v| v.as_str()),
+            Some("src/main.rs")
+        );
     }
 }

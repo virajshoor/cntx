@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 - 2026-07-13
+
+- Fix tool-call parsing: handle models that put arguments at the top level
+  (e.g. `{"name":"bash","command":"ls"}`) instead of nested under
+  `"arguments"`. Both formats are now accepted.
+- Fix sandbox blocking in non-Allow modes: `Ask` is now treated as `Allow`
+  in the tool-use loop since there is no interactive confirmation path.
+  This means tools work in all modes except `FileOnly`.
+- Improve tool-use system instruction with more examples (write, bash, glob,
+  grep) so models understand the expected format better.
+
 ## 0.5.1 - 2026-07-13
 
 - Add `/model <model>` slash command to switch the model for the current
