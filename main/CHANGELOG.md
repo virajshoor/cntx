@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 - 2026-07-13
+
+- Fix sandbox blocking in interactive mode: default to allow mode so the model
+  can actually write files and run shell commands without being blocked.
+- Fix Shift+Tab: now cycles through permission modes (Auto -> Allow -> Counsel
+  -> FileOnly -> RequestPermission -> Auto) like Claude Code, instead of
+  indent/dedent which didn't work in emacs mode.
+- Remove +tools from the prompt bar (tool-use is always on in interactive mode).
+
 ## 0.3.1 - 2026-07-13
 
 - Enable tool-use by default in interactive mode so the model can read, write,

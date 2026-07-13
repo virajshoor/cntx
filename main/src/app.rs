@@ -91,17 +91,24 @@ pub async fn run(cli: Cli) -> Result<()> {
         None => {
             let prompt = cli.prompt.join(" ");
             let sandbox = build_sandbox(&cli);
-            // In interactive mode, enable tool-use by default so the model can
-            // read, write, and run files. The user can still pass --tool-use
-            // explicitly (it's a no-op since it's already on).
-            let interactive_tool_use = cli.tool_use || prompt.trim().is_empty();
+            // In interactive mode, enable tool-use by default and use allow
+            // mode so the model can actually write files and run commands
+            // without being blocked by the sandbox permission prompt (which
+            // has no interactive path in the tool-use loop).
+            let interactive = prompt.trim().is_empty();
+            let interactive_tool_use = cli.tool_use || interactive;
+            let interactive_mode = if interactive && cli.mode == Mode::Auto {
+                Mode::Allow
+            } else {
+                cli.mode
+            };
             let mut runtime = Runtime::new(
                 config,
                 store,
                 RuntimeOptions {
                     endpoint_override: cli.endpoint,
                     model_override: cli.model,
-                    mode: cli.mode,
+                    mode: interactive_mode,
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,

@@ -1,29 +1,45 @@
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use rustyline::config::{Builder as ConfigBuilder, EditMode};
-use rustyline::{Cmd, DefaultEditor, Event, EventHandler, KeyCode, KeyEvent, Modifiers, Movement};
+use rustyline::{
+    Cmd, ConditionalEventHandler, DefaultEditor, Event, EventContext, EventHandler, KeyCode,
+    KeyEvent, Modifiers,
+};
 
 use crate::app::Runtime;
+use crate::permissions::Mode;
 use crate::permissions::Operation;
 use crate::sandbox::SandboxVerdict;
 
+/// Event handler for Shift+Tab: sets a flag and immediately accepts (returns)
+/// the line so the readline loop can detect it and cycle the permission mode.
+/// This mimics how Claude Code uses Shift+Tab to cycle modes.
+struct ShiftTabHandler;
+
+impl ConditionalEventHandler for ShiftTabHandler {
+    fn handle(&self, _evt: &Event, _n: u16, _positive: bool, _ctx: &EventContext) -> Option<Cmd> {
+        // Set the flag so the readline loop knows to cycle the mode.
+        SHIFT_TAB_PRESSED.store(true, Ordering::SeqCst);
+        // Accept the current line (like pressing Enter) so readline returns
+        // immediately.
+        Some(Cmd::AcceptLine)
+    }
+}
+
+/// Thread-local flag set by the Shift+Tab handler so the readline loop knows
+/// to cycle the mode instead of treating the empty line as a no-op.
+use std::sync::atomic::{AtomicBool, Ordering};
+static SHIFT_TAB_PRESSED: AtomicBool = AtomicBool::new(false);
+
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
-    // Configure the editor: emacs mode with indent_size=4, Tab=indent,
-    // Shift+Tab=dedent (like Claude Code).
-    let config = ConfigBuilder::new()
-        .edit_mode(EditMode::Emacs)
-        .indent_size(4)
-        .build();
+    // Configure the editor: emacs mode.
+    let config = ConfigBuilder::new().edit_mode(EditMode::Emacs).build();
     let mut editor = DefaultEditor::with_config(config)?;
-    // Tab => indent the current line
-    editor.bind_sequence(
-        Event::from(KeyEvent(KeyCode::Tab, Modifiers::NONE)),
-        EventHandler::from(Cmd::Indent(Movement::WholeLine)),
-    );
-    // Shift+Tab => dedent (remove one level of indentation)
+    // Shift+Tab => accept the line immediately; the loop detects the flag
+    // and cycles the permission mode (like Claude Code).
     editor.bind_sequence(
         Event::from(KeyEvent(KeyCode::BackTab, Modifiers::NONE)),
-        EventHandler::from(Cmd::Dedent(Movement::WholeLine)),
+        EventHandler::Conditional(Box::new(ShiftTabHandler)),
     );
     // Initialize theme from config
     crate::ui::set_theme(crate::ui::Theme::parse(&runtime.config.ui.theme));
@@ -33,8 +49,17 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
     let _ = editor.load_history(&history_path);
     print_greeting(runtime);
     ui_line("Type `/help` for commands, `/status` for the current workspace, `/exit` to quit.");
+    ui_line("Press Shift+Tab to cycle permission modes.");
 
-    while let Ok(line) = editor.readline(&prompt(runtime)) {
+    loop {
+        let line = editor.readline(&prompt(runtime))?;
+
+        // Check if Shift+Tab was pressed (the handler accepted the line).
+        if SHIFT_TAB_PRESSED.swap(false, Ordering::SeqCst) {
+            cycle_mode(runtime);
+            continue;
+        }
+
         let input = line.trim();
         if input.is_empty() {
             continue;
@@ -56,6 +81,18 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
     Ok(())
 }
 
+/// Cycle through permission modes: Auto -> Allow -> Counsel -> FileOnly -> Auto.
+fn cycle_mode(runtime: &mut Runtime) {
+    runtime.mode = match runtime.mode {
+        Mode::Auto => Mode::Allow,
+        Mode::Allow => Mode::Counsel,
+        Mode::Counsel => Mode::FileOnly,
+        Mode::FileOnly => Mode::RequestPermission,
+        Mode::RequestPermission => Mode::Auto,
+    };
+    println!("mode: {:?} - {}", runtime.mode, runtime.mode.description());
+}
+
 fn prompt(runtime: &Runtime) -> String {
     let endpoint = runtime.config.primary_endpoint.as_deref().unwrap_or("none");
     let model = runtime
@@ -72,14 +109,13 @@ fn prompt(runtime: &Runtime) -> String {
     };
     let apply = if runtime.apply { "+apply" } else { "" };
     let dry_run = if runtime.dry_run { "+dry-run" } else { "" };
-    let tools = if runtime.tool_use { "+tools" } else { "" };
     let safety = if runtime.sandbox.enabled() {
         "sandbox"
     } else {
         "unsafe"
     };
     format!(
-        "{} {} {}/{} {} {}{}{}{} ",
+        "{} {} {}/{} {} {}{}{} ",
         "cntx".cyan().bold(),
         "›".dimmed(),
         endpoint,
@@ -95,11 +131,6 @@ fn prompt(runtime: &Runtime) -> String {
             String::new()
         } else {
             format!(" {}", dry_run.yellow())
-        },
-        if tools.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", tools.cyan())
         }
     )
 }
@@ -129,7 +160,6 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/api-keys` - list stored API keys, masked\n\
 - `/default <model-or-alias>` - set the default model for this session\n\
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
-- `/tools` - toggle tool-use mode (read, write, edit files, run shell commands)\n\
 - `/dry-run` - toggle apply previews without file writes\n\
 - `/checklist` - show the files from the last apply run\n\
 - `/theme` - toggle between dark and light mode\n\
@@ -306,7 +336,7 @@ fn print_status(runtime: &Runtime) {
         runtime.mode
     );
     println!(
-        "  sandbox: {}   apply: {}   dry-run: {}   tools: {}   session: {}",
+        "  sandbox: {}   apply: {}   dry-run: {}   session: {}",
         if runtime.sandbox.enabled() {
             "on".green().to_string()
         } else {
@@ -319,11 +349,6 @@ fn print_status(runtime: &Runtime) {
         },
         if runtime.dry_run {
             "on".yellow().to_string()
-        } else {
-            "off".dimmed().to_string()
-        },
-        if runtime.tool_use {
-            "on".green().to_string()
         } else {
             "off".dimmed().to_string()
         },
