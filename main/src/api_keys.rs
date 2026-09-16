@@ -112,8 +112,14 @@ pub fn remove(store: &ConfigStore, provider: &str) -> Result<bool> {
     Ok(existed)
 }
 
-/// Resolve a key for a provider kind, falling back through the endpoint's
-/// configured env var. Returns `None` when no key is available anywhere.
+/// Resolve a key for an endpoint. The fallback order is deliberate:
+///
+/// 1. the endpoint's own configured key or `api_key_env`,
+/// 2. a key stored in the runtime secrets store under the endpoint name,
+/// 3. a key stored under the endpoint's preset identity (metadata `preset`),
+/// 4. a key stored under the provider kind — only for ordinary provider
+///    endpoints. Custom preset endpoints (for example `opencode-go`) never
+///    fall back to an unrelated provider kind's key.
 pub fn resolve_for_provider(
     store: &ConfigStore,
     endpoint: &crate::config::EndpointConfig,
@@ -122,6 +128,20 @@ pub fn resolve_for_provider(
         return Some(key);
     }
     let secrets = load(store).ok()?;
+    if let Some(key) = secrets.get(&endpoint.name) {
+        return Some(key.to_owned());
+    }
+    let preset = endpoint
+        .metadata
+        .get("preset")
+        .and_then(serde_json::Value::as_str);
+    if let Some(preset) = preset {
+        if let Some(key) = secrets.get(preset) {
+            return Some(key.to_owned());
+        }
+        // A preset endpoint never borrows another provider's key.
+        return None;
+    }
     secrets
         .get(endpoint.provider.as_str())
         .map(ToOwned::to_owned)
@@ -193,5 +213,25 @@ mod tests {
     fn short_keys_are_not_partially_revealed() {
         let display = ApiSecrets::masked("ollama-local", "abc");
         assert_eq!(display, "ollama-local: <hidden>");
+    }
+
+    #[test]
+    fn preset_endpoints_resolve_preset_keys_not_provider_kind_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ConfigStore::from_root(temp.path());
+        ensure_secrets_file(&store).unwrap();
+        // An OpenAI key exists, but a Go/custom preset endpoint must not use it.
+        add(&store, "openai", "sk-openai-key").unwrap();
+        let mut endpoint = EndpointConfig::new("opencode-go", ProviderKind::OpenAiCompatible);
+        endpoint
+            .metadata
+            .insert("preset".to_string(), serde_json::Value::from("opencode-go"));
+        assert!(resolve_for_provider(&store, &endpoint).is_none());
+
+        add(&store, "opencode-go", "oc-go-key").unwrap();
+        assert_eq!(
+            resolve_for_provider(&store, &endpoint).as_deref(),
+            Some("oc-go-key")
+        );
     }
 }

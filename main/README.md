@@ -1,80 +1,39 @@
 # Cntx Code
 
-Cntx Code is a BYOK, token-efficient AI coding assistant for the terminal. It is
-inspired by modern agentic coding tools, but its central design goal is token
-efficiency: keep the normal developer workflow while sending less unnecessary
-context to model providers.
+Cntx Code is a BYOK, token-efficient AI coding assistant for the terminal. Its
+core is written in C (C17) with Rust for transport, terminal, and
+serialization, so normal prompts reliably create and edit files, run commands,
+and keep context across turns.
 
 - Web: <https://cntxcode.com>
 - Docs: <https://cntxcode.com/docs>
-- Redirect: <https://cntx.codes> points to cntxcode.com
+- Source: <https://github.com/virajshoor/cntx>
 
 ## What Cntx Code Is For
 
 - You choose your provider, endpoint, model, and API key.
-- Cntx optimizes prompts before routing.
-- Auto mode chooses a model based on optimized prompt size.
-- Counsel mode uses multiple model families while keeping the evaluation prompt bounded.
-- Built-in doc search (Context7) and built-in token saving (Headroom) ship as
-  on-demand MCP servers; custom MCPs are supported too.
-- An edit sandbox confines file edits to your project by default so the assistant
-  cannot break the wider machine.
+- Tool mode is on by default: prompts can read, write, and edit files and run
+  shell commands, with approval modes controlling what asks first.
+- An edit sandbox confines file writes to your project by default; symlink and
+  traversal escapes are rejected. Shell commands are policy-gated but are not
+  OS-level isolation.
+- Sessions persist tool results, decisions, and goal state; `/compact`
+  summarizes older turns without changing the session id; `/goal` runs bounded,
+  resumable, goal-oriented work.
+- OpenCode Go works as a first-class subscription provider.
 - API keys live in a gitignored runtime store that auto-creates on first boot.
-- Aliases and a persistent default model keep daily usage simple.
-
-## Current Status
-
-Implemented:
-
-- Rust `cntx` CLI binary
-- OpenAI, Anthropic, OpenAI-compatible, Ollama Local, and Ollama Cloud provider adapters
-- Custom provider presets defined in YAML
-- Runtime API key store (`cntx api-key add/change/delete/list`)
-- Endpoint create/change/remove/list/set-primary/import
-- Model alias add/remove/list, and a persistent default model (`cntx model default`)
-- Model cache with deprecation detection and refresh
-- Automatic model routing by prompt size after optimization
-- Counsel mode for token-efficient multi-model collaboration
-- Prompt optimization, project memory, `@file` references, and bounded project
-  context selection
-- Streaming chat adapters
-- Interactive shell with slash commands
-- Interactive markdown rendering, status prompt, and working-dot animation
-- Session list/resume/export/import
-- Skills stored in user or project config
-- Edit sandbox with `--allow-write` and `--dangerously-disable-sandbox`
-- Apply mode that writes `path=` fenced code blocks through the sandbox and
-  prints a file preview and checklist; `--dry-run` previews without writing
-- `bench --json` and `doctor --json` for automation-friendly diagnostics
-- Built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
-- Permission modes: auto, counsel, allow, request-permission, file-only
-- Unit tests for core behavior
-- Tool-use loop (`--tool-use`) with read, write, edit, bash, glob, and grep tools
-- Thinking indicator with animated dots while the model generates
-- Shift+Tab permission-mode cycling in the interactive shell
-- Dark/light mode toggle (`/theme` slash command)
-- Effort control (`/effort low|medium|high`) for faster or more thorough work
-- Fresh conversation reset (`/clear`) and live streamed-response preview
-
-Not complete yet:
-
-- Provider-specific tokenizers
-- Semantic repository index
-- Full agent loop that calls MCP tools automatically
+- Auto mode chooses a model based on optimized prompt size; counsel mode keeps
+  multi-model evaluation bounded.
 
 ## Install
+
+Requires a C compiler (cc/clang/gcc) and a Rust toolchain; targets are macOS
+and Linux.
 
 From crates.io (recommended):
 
 ```bash
 cargo install cntx
-```
-
-From Homebrew:
-
-```bash
-brew tap virajshoor/cntx
-brew install cntx
 ```
 
 From source:
@@ -85,89 +44,83 @@ cd cntx/main
 cargo install --path .
 ```
 
-During development:
+## OpenCode Go quick start
+
+[OpenCode Go](https://opencode.ai/docs/go/) is a $10/month subscription for
+open coding models. Requests use the client user agent `cntx/<version>` and a
+stable `x-opencode-session` id per conversation.
 
 ```bash
-cargo run -- --help
+cntx api-key add --provider opencode-go
+cntx provider install-preset opencode-go
+cntx provider use opencode-go
+cntx --refresh-models
+cntx "explain this repository"
 ```
 
-## Quick Start
+The key resolves from `OPENCODE_GO_API_KEY` or the runtime store; a Go endpoint
+never borrows another provider's key. See
+[docs/opencode-go.md](docs/opencode-go.md) for protocol details and limits.
+
+## Any other provider
 
 ```bash
-# Add an API key (stored in a gitignored runtime file)
 cntx api-key add --provider anthropic
-
-# Create an endpoint
-cntx endpoint --new \
-  --name work \
-  --provider anthropic
-
+cntx endpoint --new --name work --provider anthropic
 cntx endpoint --set-primary work
 cntx --refresh-models
 cntx "explain this repository"
 ```
 
-Pick a default model once and stop passing `--model`:
+OpenAI, Anthropic, OpenAI-compatible gateways, Ollama Local, Ollama Cloud, and
+YAML-defined custom presets are supported: [docs/providers.md](docs/providers.md).
 
-```bash
-cntx model list
-cntx model default <model-id-or-alias>
-cntx "write a focused test plan"
+## Working session example
+
+```text
+$ cntx
+cntx › work/glm-5.3-flash auto-approve sandbox
+
+> /goal add pagination to the users endpoint and run the tests
+goal started (Ctrl+C pauses; /goal pause also works)
+~ reading src/users.rs
+~ [ok] reading src/users.rs
+~ editing src/users.rs
+~ [ok] editing src/users.rs
+~ running: cargo test users
+~ [ok] running: cargo test users
+goal marked completed. Evidence recorded: cargo test users: 9 passed
+
+> /model glm-5.3
+model set to glm-5.3 for this session
+> /mode manual-approve
+mode: manual-approve - ask before every tool, file, or shell operation.
+> /compact
+compacted 14 messages (session 7f3c... unchanged)
 ```
 
-Polish commands for day-one use:
+## Approval modes
 
-```bash
-cntx init --yes --provider anthropic --name work
-cntx doctor --fix
-cntx doctor --json
-cntx bench "refactor this module without changing behavior"
-cntx bench --json "refactor this module without changing behavior"
-cntx demo
-cntx completions zsh > ~/.zfunc/_cntx
-cntx memory add prefer small, focused diffs in this repository
-cntx provider gallery
-cntx provider install-preset openrouter
-cntx --docs
-cntx --effort high "investigate and fix the failing tests"
-```
+| Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel |
+| --- | --- | --- | --- | --- | --- |
+| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow |
+| In-root write/edit | Ask | Allow | Ask | Allow | Ask |
+| Shell command | Ask | Allow | Ask | Deny | Ask |
+| Outside-root write | Deny | Deny | Deny | Deny | Deny |
 
-Use built-in doc search and token saving:
-
-```bash
-cntx mcp list
-cntx mcp tools context7
-cntx mcp tools headroom
-```
-
-Use the sandbox:
-
-```bash
-cntx sandbox
-cntx --allow-write /Users/you/shared "refactor the shared utilities"
-```
-
-Use apply mode for real file writes:
-
-```bash
-cntx --apply --mode allow "create a small README section for this crate"
-cntx --apply --dry-run --mode allow "preview a README section for this crate"
-cntx
-/apply
-/dry-run
-/checklist
-/effort high
-/clear
-```
-
-In apply mode, Cntx asks the model for complete fenced code blocks annotated with
-`path=...`, writes them through the sandbox, and keeps the last file checklist
-available in interactive chat.
+`--mode all-approve` executes permitted tools without prompts; file containment
+still applies. `--dry-run` blocks mutations and shell execution.
+[docs/modes.md](docs/modes.md) has full semantics.
 
 ## Documentation
 
 - [Changelog](CHANGELOG.md)
 - [Project explanation](EXPLAIN.md)
+- [Command reference](docs/commands.md)
+- [Approval modes](docs/modes.md)
+- [Goals](docs/goals.md)
+- [OpenCode Go](docs/opencode-go.md)
+- [Sessions](docs/sessions.md)
 - [API keys](docs/api-keys.md)
 - [Apply mode](docs/apply.md)
 - [Doc search and token saving (MCP)](docs/mcp.md)
@@ -175,23 +128,38 @@ available in interactive chat.
 - [Sandbox](docs/sandbox.md)
 - [Provider setup](docs/providers.md)
 - [Ollama Cloud and Pro](docs/ollama-cloud.md)
-- [Command reference](docs/commands.md)
 - [Model routing](docs/routing.md)
 - [Configuration](docs/configuration.md)
 - [Skills](docs/skills.md)
-- [Modes](docs/modes.md)
-- [Sessions](docs/sessions.md)
 - [API references](docs/api-references.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-## Verification
+## Architecture and verification
+
+- **C core** (`csrc/`): permission decisions, tool validation, file tools,
+  bounded command execution, goal state machine, context budgets, routing
+  classification, Go protocol selection.
+- **Rust** (`src/`): CLI, terminal, HTTP/TLS streaming, JSON/YAML, key store,
+  sessions, and the safe FFI wrapper (`src/core.rs`).
+- **Shell** (`scripts/verify.sh`): repeatable verification.
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build
+sh scripts/verify.sh   # C sanitizer tests + package checks + temp-root install
 ```
+
+## Known limitations
+
+- Models call tools through a text `<tool>{...}</tool>` protocol, not
+  provider-native tool-call APIs.
+- Token counts are estimates, not provider tokenizers.
+- MCP servers run on demand (`cntx mcp tools <name>`), not automatically.
+- OpenCode Go protocol handling is verified against a local HTTP mock, not an
+  authenticated live subscription.
+- Windows is not supported.
 
 ## License
 

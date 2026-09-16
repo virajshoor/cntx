@@ -5,6 +5,7 @@ pub mod blocklist;
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod core;
 pub mod counsel;
 pub mod errors;
 pub mod interactive;

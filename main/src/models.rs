@@ -127,6 +127,30 @@ pub async fn refresh_models(config: &AppConfig, store: &ConfigStore) -> Result<R
             })
             .collect::<Vec<_>>();
 
+        // Ollama local models report their context length through /api/show;
+        // capture it (bounded, best-effort) so the input budget is sized to
+        // the real context window instead of the default.
+        if endpoint.provider == crate::config::ProviderKind::OllamaLocal {
+            const SHOW_QUERIES_LIMIT: usize = 32;
+            for model in models.iter_mut().take(SHOW_QUERIES_LIMIT) {
+                let window = async {
+                    anyhow::Ok(
+                        crate::providers::client(&endpoint)?
+                            .post(crate::providers::join_url(&endpoint.base_url, "api/show"))
+                            .json(&serde_json::json!({ "model": model.info.id }))
+                            .send()
+                            .await?
+                            .json::<serde_json::Value>()
+                            .await?,
+                    )
+                }
+                .await
+                .ok()
+                .and_then(|value| crate::providers::parse_ollama_context_window(&value));
+                model.info.context_window = window;
+            }
+        }
+
         for deprecated_id in &deprecated {
             models.push(CachedModel {
                 info: ModelInfo::new(deprecated_id),

@@ -18,15 +18,25 @@ Interactive commands:
 ```text
 /help       - show available commands
 /status     - show endpoint, model, mode, sandbox, and apply state
+/mode       - show the active approval mode
+/mode <name> - switch modes: auto-approve, all-approve, manual-approve, counsel, file-only
+/model      - show the effective endpoint and model
+/model <id> - switch the model for this session; /model auto restores routing
+/models     - list cached models grouped by endpoint
 /effort     - show the active effort level
 /effort high - investigate and verify more thoroughly
-/clear      - start a fresh conversation session
+/goal       - show goal status (no model call)
+/goal <objective> - start bounded goal work
+/goal resume|pause|cancel - continue, pause, or cancel the goal
+/resume [id] - load a saved session and continue interactively
+/clear      - save the old session and start a fresh one
+/compact    - summarize older turns; the session id stays the same
+/cost       - show estimated token usage and cost for this session
 /apply      - toggle apply mode
-/dry-run    - toggle apply previews without file writes
+/dry-run    - block mutations and shell execution
 /checklist  - show files from the last apply run
 /theme      - toggle between dark and light mode
 /sandbox    - show sandbox policy
-/models     - list cached models and aliases
 /endpoints  - list endpoints
 /exit       - quit
 ```
@@ -36,7 +46,7 @@ Interactive commands:
 ```bash
 cntx --model <MODEL_OR_ALIAS>
 cntx --endpoint <ENDPOINT_NAME>
-cntx --mode auto|counsel|allow|request-permission|file-only
+cntx --mode auto-approve|all-approve|manual-approve|counsel|file-only
 cntx --effort low|medium|high
 cntx --refresh-models
 cntx --docs                          # open packaged interactive docs
@@ -45,8 +55,14 @@ cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
 cntx --dry-run                       # preview apply-mode writes without writing
 cntx --dangerously-disable-sandbox "edit anywhere"
-cntx --tool-use                      # enable tool-use for one-shot prompts
+cntx --tool-use                      # compatible explicit tool-mode flag
+cntx --chat-only                     # text-only: no writes or shell commands
+cntx --goal                          # (goals are started with /goal in a session)
 ```
+
+Tool mode is on by default for interactive and one-shot prompts. `--apply`
+one-shot prompts use the separate apply path unless tool mode is explicitly
+selected.
 
 Prompts automatically include a small amount of bounded project context when it
 is useful. Use `@path/to/file` in a prompt to force an explicit file excerpt into
@@ -196,7 +212,7 @@ cntx config show
 
 ```bash
 cntx session list
-cntx session resume          # latest session
+cntx session resume          # latest session for the current workspace
 cntx session resume <id>
 cntx session export <id> session.json
 cntx session import session.json

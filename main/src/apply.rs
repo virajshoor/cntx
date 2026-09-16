@@ -364,49 +364,29 @@ fn write_one(sandbox: &Sandbox, file: &ProposedFile, root: &Path) -> ApplyOutcom
         root.join(&file.path)
     };
 
-    let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    match verdict.decision {
-        PermissionDecision::Allow => {
-            if let Some(parent) = target.parent() {
-                if let Err(error) = std::fs::create_dir_all(parent) {
-                    return ApplyOutcome {
-                        path: file.path.clone(),
-                        status: ApplyStatus::Error,
-                        reason: format!("could not create directory: {error}"),
-                    };
-                }
-            }
-            match std::fs::write(&target, &file.content) {
-                Ok(()) => ApplyOutcome {
-                    path: file.path.clone(),
-                    status: ApplyStatus::Written,
-                    reason: verdict.reason,
-                },
-                Err(error) => ApplyOutcome {
-                    path: file.path.clone(),
-                    status: ApplyStatus::Error,
-                    reason: error.to_string(),
-                },
-            }
-        }
-        PermissionDecision::Deny => {
-            let outside = !sandbox.is_within_allowed(&target);
-            ApplyOutcome {
-                path: file.path.clone(),
-                status: if outside {
-                    ApplyStatus::OutsideSandbox
-                } else {
-                    ApplyStatus::Blocked
-                },
-                reason: verdict.reason,
-            }
-        }
-        PermissionDecision::Ask => ApplyOutcome {
-            path: file.path.clone(),
-            status: ApplyStatus::Blocked,
-            reason: "interactive approval required; rerun in interactive mode or use --mode allow"
-                .to_string(),
+    let call = crate::tools::ToolCall {
+        name: "write".into(),
+        arguments: serde_json::json!({ "path": target, "content": file.content }),
+    };
+    let result = crate::tools::execute_tool(
+        &call,
+        sandbox,
+        root,
+        false,
+        &mut crate::permissions::confirm,
+    );
+    ApplyOutcome {
+        path: file.path.clone(),
+        status: if !result.is_error {
+            ApplyStatus::Written
+        } else if sandbox.enabled() && !sandbox.is_within_allowed(&target) {
+            ApplyStatus::OutsideSandbox
+        } else if result.output.contains("denied") || result.output.contains("Blocked") {
+            ApplyStatus::Blocked
+        } else {
+            ApplyStatus::Error
         },
+        reason: result.output,
     }
 }
 
@@ -528,6 +508,47 @@ mod tests {
         }];
         let outcomes = apply(&sandbox, &files, &root);
         assert_eq!(outcomes[0].status, ApplyStatus::OutsideSandbox);
+    }
+
+    #[test]
+    fn apply_reports_write_failure_without_panicking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // A file occupies the parent path, so the write cannot succeed.
+        std::fs::write(root.join("blocker"), "regular file").unwrap();
+        let sandbox = Sandbox::new(crate::permissions::Mode::Allow, root.clone(), Vec::new());
+        let files = vec![ProposedFile {
+            path: PathBuf::from("blocker/inner.rs"),
+            language: "rust".to_string(),
+            content: "unwritable".to_string(),
+        }];
+        let outcomes = apply(&sandbox, &files, &root);
+        assert_eq!(outcomes[0].status, ApplyStatus::Error);
+        assert!(outcomes[0].reason.contains("Error"));
+        assert!(!root.join("blocker/inner.rs").exists());
+    }
+
+    #[test]
+    fn apply_does_not_follow_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            symlink(&outside_path, root.join("src/link")).unwrap();
+            let sandbox = Sandbox::new(crate::permissions::Mode::Allow, root.clone(), Vec::new());
+            let files = vec![ProposedFile {
+                path: PathBuf::from("src/link/evil.rs"),
+                language: "rust".to_string(),
+                content: "bad".to_string(),
+            }];
+            let outcomes = apply(&sandbox, &files, &root);
+            assert_ne!(outcomes[0].status, ApplyStatus::Written);
+            assert!(!outside_path.join("evil.rs").exists());
+        }
     }
 
     #[test]

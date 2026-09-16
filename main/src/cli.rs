@@ -70,9 +70,15 @@ pub struct Cli {
     pub dry_run: bool,
 
     /// Enable the tool-use loop so the model can read, write, edit files, and
-    /// run shell commands through tool calls.
+    /// run shell commands through tool calls. Tool mode is on by default;
+    /// this flag remains for compatibility.
     #[arg(long, global = true, help_heading = "Tools")]
     pub tool_use: bool,
+
+    /// Run prompts text-only: no file writes or shell commands, even when a
+    /// model asks for them. Overrides the default tool mode.
+    #[arg(long, global = true, help_heading = "Tools")]
+    pub chat_only: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,

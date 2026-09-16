@@ -15,5 +15,6 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
+    cntx::interactive::spawn_ctrl_c_handler();
     app::run(Cli::parse()).await
 }

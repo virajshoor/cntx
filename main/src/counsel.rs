@@ -24,6 +24,14 @@ impl CounselTask {
             Self::Refactor => "refactor",
         }
     }
+
+    fn from_code(code: i32) -> Self {
+        match code {
+            crate::core::TASK_SMALL_CHANGE => Self::SmallChange,
+            crate::core::TASK_REFACTOR => Self::Refactor,
+            _ => Self::Evaluate,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -33,39 +41,10 @@ pub struct CounselPlan {
     pub task: CounselTask,
 }
 
+/// Classification runs in the C core so counsel and any other consumer
+/// share one bounded keyword scan.
 pub fn classify_counsel_task(prompt: &str) -> CounselTask {
-    let prompt = prompt.to_lowercase();
-    if contains_any(
-        &prompt,
-        &[
-            "refactor",
-            "restructure",
-            "rewrite",
-            "architecture",
-            "extract",
-            "split",
-            "modularize",
-            "redesign",
-        ],
-    ) {
-        CounselTask::Refactor
-    } else if contains_any(
-        &prompt,
-        &[
-            "fix",
-            "change",
-            "add",
-            "implement",
-            "update",
-            "modify",
-            "patch",
-            "build",
-        ],
-    ) {
-        CounselTask::SmallChange
-    } else {
-        CounselTask::Evaluate
-    }
+    CounselTask::from_code(crate::core::counsel_classify(prompt))
 }
 
 pub fn plan_counsel<'a>(

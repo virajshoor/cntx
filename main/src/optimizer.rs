@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-const INITIAL_PROMPT_BUFFER_CAP: usize = 64 * 1024;
 const MAX_CONTEXT_SCAN_BYTES: u64 = 128 * 1024;
 const MAX_CONTEXT_EXCERPT_CHARS: usize = 800;
 
@@ -38,42 +37,9 @@ pub struct PromptOptimizer;
 
 impl PromptOptimizer {
     pub fn optimize(&self, prompt: &str) -> OptimizedPrompt {
-        let mut seen = HashSet::new();
-        let mut duplicate_lines_removed = 0;
-        let mut text = String::with_capacity(prompt.len().min(INITIAL_PROMPT_BUFFER_CAP));
-        let mut in_code_fence = false;
-        let mut pending_blank = false;
-        let mut emitted_any = false;
-
-        for line in prompt.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("```") {
-                in_code_fence = !in_code_fence;
-                push_collapsed_line(
-                    &mut text,
-                    line.trim_end(),
-                    &mut pending_blank,
-                    &mut emitted_any,
-                );
-                continue;
-            }
-
-            if !in_code_fence && !trimmed.is_empty() {
-                let normalized = normalize_whitespace(trimmed);
-                if normalized.len() > 24 && !seen.insert(normalized.clone()) {
-                    duplicate_lines_removed += 1;
-                    continue;
-                }
-                push_collapsed_line(&mut text, &normalized, &mut pending_blank, &mut emitted_any);
-            } else {
-                push_collapsed_line(
-                    &mut text,
-                    line.trim_end(),
-                    &mut pending_blank,
-                    &mut emitted_any,
-                );
-            }
-        }
+        // Failed optimization must preserve the complete user's input.
+        let (text, duplicate_lines_removed) =
+            crate::core::optimize(prompt).unwrap_or_else(|_| (prompt.to_string(), 0));
 
         let estimated_tokens = estimate_tokens(&text);
         OptimizedPrompt {
@@ -91,46 +57,7 @@ impl PromptOptimizer {
 pub fn estimate_tokens(text: &str) -> usize {
     let chars = text.chars().count();
     let words = text.split_whitespace().count();
-    chars.div_ceil(4).max(words)
-}
-
-fn normalize_whitespace(line: &str) -> String {
-    let mut normalized = String::with_capacity(line.len());
-    let mut pending_space = false;
-
-    for part in line.split_whitespace() {
-        if pending_space {
-            normalized.push(' ');
-        }
-        normalized.push_str(part);
-        pending_space = true;
-    }
-
-    normalized
-}
-
-fn push_collapsed_line(
-    output: &mut String,
-    line: &str,
-    pending_blank: &mut bool,
-    emitted_any: &mut bool,
-) {
-    if line.trim().is_empty() {
-        if *emitted_any {
-            *pending_blank = true;
-        }
-        return;
-    }
-
-    if *pending_blank && !output.is_empty() {
-        output.push('\n');
-    }
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(line);
-    *pending_blank = false;
-    *emitted_any = true;
+    crate::core::estimate_tokens(chars, words)
 }
 
 #[derive(Clone, Debug)]
@@ -168,7 +95,7 @@ impl ProjectContextSelector {
                 return Ok(());
             };
             let lower = contents.to_lowercase();
-            let score = terms.iter().filter(|term| lower.contains(*term)).count();
+            let score = crate::core::context_score(&lower, &terms);
             if score > 0 {
                 candidates.push(ContextCandidate {
                     path: path.to_path_buf(),
@@ -212,6 +139,9 @@ fn visit_files_bounded(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if entry.file_type()?.is_symlink() {
+            continue;
+        }
         let file_name = path
             .file_name()
             .and_then(|value| value.to_str())

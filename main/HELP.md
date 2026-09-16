@@ -181,15 +181,18 @@ The gold tick (X Verified Organizations):
 cargo build --release
 ```
 
-The release binary is at `target/release/cntx`.
+The release binary is at `target/release/cntx`. Building requires a C17 compiler
+(cc/clang/gcc) because the product core is C linked through Cargo.
 
-Verify before publishing:
+Verify before publishing (or run `sh scripts/verify.sh`, which does all of it
+including C sanitizer tests and a temporary-root install check):
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
+cargo package --list
 ```
 
 ### Publish to crates.io
@@ -340,7 +343,7 @@ When to start:
 1. Finalize the GitHub repo: README, demo GIF, one-line install, topics, project URL.
 2. Stand up cntxcode.com with the landing pages and canonical/redirect setup.
 3. Cut the first GitHub Release with macOS + Linux binaries and checksums.
-4. Publish the Homebrew tap and verify `brew install cntx-code` works clean.
+4. Publish the Homebrew tap and verify `brew install cntx` works clean.
 5. Record the 60s demo and pin it on X.
 6. Prepare the HN "Show HN" title and a genuine, technical first comment.
 7. Schedule the launch week: HN + Reddit + X on one morning, dev.to deep dive

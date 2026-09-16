@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+- **C core**: the product's decisions now live in a C17 core (`csrc/`) linked
+  through Cargo — approval-mode semantics, tool validation, file tools, bounded
+  command execution, goal state transitions, context budgets, routing
+  classification, and OpenCode Go protocol selection. Rust remains the
+  transport/CLI adapter layer.
+- Tool mode is on by default for interactive and one-shot prompts; added
+  `--chat-only` for explicit text-only operation (`--tool-use` stays as a
+  compatible flag).
+- New approval modes: `auto-approve` (default), `all-approve`, and
+  `manual-approve`, with legacy aliases (`auto`, `allow`,
+  `request-permission`) preserved. `/mode` validates and updates runtime and
+  sandbox policy together; Shift+Tab cycles the canonical order and preserves
+  the input draft.
+- Every tool passes one validation/permission boundary: missing/empty
+  required arguments are rejected, ambiguous edits fail without corrupting
+  files, dry-run blocks both mutations and shell execution, and denied
+  approvals produce errors instead of silent workarounds.
+- Shell tools capture output through temporary files with bounds, enforce a
+  60s default timeout (optional `timeout_secs` up to 600), terminate and reap
+  the child process group on timeout/cancellation, and cap temporary output at
+  10 MiB per stream. Grep results are bounded and no longer conflate "no
+  matches" with execution errors.
+- Nested-path writes: missing parent directories resolve safely; `..`
+  traversal and dangling symlinks cannot escape the sandbox.
+- Sessions persist tool calls, tool results, and goal state atomically;
+  `/compact` keeps the session id, preserves summaries, decisions, goals, and
+  recent turns; auto-compaction keeps requests within the token budget;
+  `/resume` and `cntx session resume` actually resume interactive work.
+- Added `/goal` for persistent goal-oriented work with validated
+  `goal_update` actions, step budgets (default 50 per batch), stall
+  detection, and pause/resume/cancel controls.
+- `/model` gained endpoint/alias conflict reporting and `auto` reset; `/effort`
+  persists and drives worker instructions; `/clear` keeps mode/endpoint/model/
+  effort; prompts containing ` && ` are no longer split into a queue.
+- OpenCode Go subscription provider: built-in preset, `OPENCODE_GO_API_KEY`
+  support, per-family protocol routing (chat completions, Anthropic-compatible
+  messages, OpenAI Responses), `User-Agent: cntx/<version>`, and stable
+  `x-opencode-session` ids on every Go request.
+- API key resolution now honors endpoint and preset identity before provider
+  kind fallback, so custom presets never borrow an unrelated provider's key.
+- Anthropic-compatible adapters merge all system messages instead of dropping
+  skills/summaries.
+- Direct file reads respect the same secret-file exclusions as grep/glob.
+- Malformed `<tool>` blocks are rejected with correction feedback (at most
+  twice) instead of silent success.
+- Docs: rewritten READMEs, new goals and OpenCode Go pages, updated mode/
+  session/command/sandbox/apply/provider/configuration documentation, and a
+  packaged docs browser that includes the new pages.
+
 ## 0.5.2 - 2026-07-13
 
 - Fix tool-call parsing: handle models that put arguments at the top level

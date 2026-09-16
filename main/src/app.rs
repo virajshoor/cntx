@@ -33,7 +33,7 @@ use crate::permissions::Mode;
 use crate::providers::{adapter_for, validate_chat_request, ChatMessage, ChatRequest};
 use crate::router::ModelRouter;
 use crate::sandbox::Sandbox;
-use crate::sessions::{Session, SessionStore};
+use crate::sessions::{Session, SessionMessage, SessionStore};
 use crate::skills::SkillStore;
 use crate::ui;
 
@@ -90,7 +90,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Memory(command)) => handle_memory(command),
         Some(Command::Mcp(command)) => handle_mcp(command, &store, &mut config).await,
         Some(Command::Config(command)) => handle_config(command, &store, &config),
-        Some(Command::Session(command)) => handle_session(command, &store),
+        Some(Command::Session(command)) => handle_session(command, &store).await,
         Some(Command::Skill(command)) => handle_skill(command, &store),
         Some(Command::Sandbox { yaml }) => handle_sandbox(&cli, &config, yaml),
         Some(Command::Doctor { fix, json, verify }) => {
@@ -99,18 +99,22 @@ pub async fn run(cli: Cli) -> Result<()> {
         None => {
             let prompt = cli.prompt.join(" ");
             let interactive = prompt.trim().is_empty();
-            // In interactive mode, use allow mode so the model can write files
-            // and run shell commands without being blocked by the sandbox
-            // permission prompt (which has no interactive path in the tool-use
-            // loop). The sandbox must be built with the correct mode so its
-            // internal PermissionPolicy matches.
-            let effective_mode = if interactive && cli.mode == Mode::Auto {
-                Mode::Allow
+            // The mode stays exactly as configured; the default `auto-approve`
+            // policy already allows reads and asks before writes/commands.
+            // Interactive upgrades are never applied silently.
+            let sandbox = build_sandbox_with_mode(&cli, cli.mode);
+            // Tool mode is the default for interactive sessions and one-shot
+            // prompts so both can create/edit/run without --tool-use.
+            // `--chat-only` forces text-only operation. `--tool-use` remains a
+            // compatible explicit flag. One-shot `--apply` keeps the separate
+            // apply path unless tool mode is explicitly selected.
+            let tool_use = if cli.chat_only {
+                false
+            } else if cli.tool_use {
+                true
             } else {
-                cli.mode
+                !cli.apply || interactive
             };
-            let sandbox = build_sandbox_with_mode(&cli, effective_mode);
-            let interactive_tool_use = cli.tool_use || interactive;
             let effort = cli.effort.unwrap_or(config.ui.effort);
             let mut runtime = Runtime::new(
                 config,
@@ -118,12 +122,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 RuntimeOptions {
                     endpoint_override: cli.endpoint,
                     model_override: cli.model,
-                    mode: effective_mode,
+                    mode: cli.mode,
                     effort,
                     apply: cli.apply,
                     dry_run: cli.dry_run,
                     sandbox,
-                    tool_use: interactive_tool_use,
+                    tool_use,
                 },
             )?;
             if !prompt.trim().is_empty() {
@@ -153,6 +157,12 @@ pub struct Runtime {
     pub active_skill: Option<crate::skills::Skill>,
     /// Running cost estimate for the current session (USD cents).
     pub cost_tracker: CostTracker,
+    /// Why the active goal paused: denied approval, blocker, or stall.
+    pub goal_pause_reason: Option<String>,
+    /// Consecutive goal turns with no tool action or progress update.
+    pub goal_stall: u32,
+    /// Whether the most recent turn performed a tool action or goal update.
+    pub turn_had_action: bool,
 }
 
 /// Tracks estimated token usage and cost for a session.
@@ -191,6 +201,8 @@ pub struct RuntimeOptions {
 
 impl Runtime {
     pub fn new(config: AppConfig, store: ConfigStore, options: RuntimeOptions) -> Result<Self> {
+        let mut session = Session::new("interactive");
+        session.workspace_root = Some(options.sandbox.project_root().to_path_buf());
         Ok(Self {
             config,
             store,
@@ -202,16 +214,20 @@ impl Runtime {
             dry_run: options.dry_run,
             tool_use: options.tool_use,
             sandbox: options.sandbox,
-            session: Session::new("interactive"),
+            session,
             last_apply_outcomes: Vec::new(),
             active_skill: None,
             cost_tracker: CostTracker::default(),
+            goal_pause_reason: None,
+            goal_stall: 0,
+            turn_had_action: false,
         })
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<()> {
         // Initialize theme from config
         ui::set_theme(ui::Theme::parse(&self.config.ui.theme));
+        self.goal_pause_reason = None;
         // Mark that a prompt is running so Ctrl+C interrupts instead of quitting.
         crate::interactive::set_prompt_running(true);
         let result = self.run_prompt_inner(prompt).await;
@@ -220,12 +236,23 @@ impl Runtime {
     }
 
     async fn run_prompt_inner(&mut self, prompt: &str) -> Result<()> {
-        let scan_project = has_project_marker(self.sandbox.project_root());
-        let prompt_input =
-            build_prompt_input_with_scan(prompt, self.sandbox.project_root(), scan_project);
+        // Manual-approve mode skips implicit repository scans and content
+        // reads; a single explicit approval covers any requested context
+        // bundle before its contents are read and sent.
+        let prompt_input = if self.mode == Mode::RequestPermission {
+            crate::context::build_prompt_input_with_approval(
+                prompt,
+                self.sandbox.project_root(),
+                &crate::permissions::confirm,
+            )
+        } else {
+            let scan_project = has_project_marker(self.sandbox.project_root());
+            build_prompt_input_with_scan(prompt, self.sandbox.project_root(), scan_project)
+        };
         let optimizer = PromptOptimizer;
         let optimized = optimizer.optimize(&prompt_input.text);
         let (endpoint_name, endpoint) = self.resolve_endpoint()?;
+        self.compact_if_needed(&optimized).await?;
         if self.mode == Mode::Counsel {
             return self
                 .run_counsel_prompt(
@@ -240,10 +267,17 @@ impl Runtime {
 
         let model =
             self.resolve_model(&endpoint_name, &endpoint, optimized.report.estimated_tokens)?;
+        let model = crate::providers::normalize_model_for_endpoint(&endpoint, &model);
 
-        // Tool-use mode: run the tool loop instead of the normal chat flow
+        // Tool mode: run the tool loop. Also the default so prompts can
+        // create/edit/run; chat-only paths are the explicit alternative.
         if self.tool_use {
-            let mode_label = "tool-use";
+            let history = self.session_history_messages();
+            let mode_label = if self.session.goal.as_ref().is_some_and(|g| g.is_active()) {
+                "tool-use goal"
+            } else {
+                "tool-use"
+            };
             print_prompt_preview(
                 &endpoint_name,
                 &model,
@@ -256,9 +290,9 @@ impl Runtime {
                 prompt_input.context.included_items(),
             );
 
-            let history = self.session_history_messages();
             let skill_prompt = self.active_skill.as_ref().map(|s| s.prompt.clone());
             self.session.push("user", prompt);
+            self.save_session()?;
             let assistant_text = crate::tools::run_tool_loop(
                 &optimized.text,
                 &self.sandbox,
@@ -269,14 +303,34 @@ impl Runtime {
                     history,
                     skill_prompt,
                     effort: self.effort,
+                    goal: self.goal_prompt_state(),
+                    session_id: Some(self.session.id.clone()),
+                },
+                &mut LoopHost {
+                    budget: self.request_budget(&endpoint_name, &model)?,
+                    goal_running: self.session.goal.as_ref().is_some_and(|g| g.is_active()),
+                    store: &self.store,
+                    session: &mut self.session,
+                    pause_reason: &mut self.goal_pause_reason,
+                    had_action: &mut self.turn_had_action,
+                    dry_run: self.dry_run,
                 },
             )
-            .await?;
+            .await;
+            let assistant_text = match assistant_text {
+                Ok(text) => text,
+                Err(error) => {
+                    // Failed requests preserve saved state; the transcript
+                    // already captured the user turn and any tool results.
+                    return Err(error);
+                }
+            };
+            self.track_cost(optimized.report.estimated_tokens, &assistant_text);
             ui::print_markdown(&assistant_text);
             println!();
 
-            self.session.push("assistant", assistant_text);
-            SessionStore::new(&self.store).save(&self.session)?;
+            self.session.push("assistant", assistant_text.clone());
+            self.save_session()?;
             return Ok(());
         }
 
@@ -327,23 +381,81 @@ impl Runtime {
             model,
             messages,
             max_tokens: Some(4096),
+            session_id: Some(self.session.id.clone()),
         };
         validate_chat_request(&request)?;
 
         self.session.push("user", prompt);
+        self.save_session()?;
+        if !self.count_provider_turn()? {
+            return Ok(());
+        }
         let assistant_text = self.generate(&endpoint, request).await?;
-        // Track estimated cost: input ~ optimized prompt, output ~ response
-        self.cost_tracker.add(
-            optimized.report.estimated_tokens,
-            estimate_output_tokens(&assistant_text),
-        );
+        self.track_cost(optimized.report.estimated_tokens, &assistant_text);
         ui::print_markdown(&assistant_text);
         println!();
 
         self.apply_files(&assistant_text);
 
         self.session.push("assistant", assistant_text);
+        self.save_session()?;
+        Ok(())
+    }
+
+    fn count_provider_turn(&mut self) -> Result<bool> {
+        use crate::tools::ToolHost;
+        LoopHost {
+            budget: self.config.routing.input_token_budget,
+            goal_running: self.session.goal.as_ref().is_some_and(|g| g.is_active()),
+            store: &self.store,
+            session: &mut self.session,
+            pause_reason: &mut self.goal_pause_reason,
+            had_action: &mut self.turn_had_action,
+            dry_run: self.dry_run,
+        }
+        .before_request()
+    }
+
+    fn track_cost(&mut self, input_tokens: usize, output_text: &str) {
+        self.cost_tracker
+            .add(input_tokens, estimate_output_tokens(output_text));
+    }
+
+    pub fn save_session(&self) -> Result<()> {
         SessionStore::new(&self.store).save(&self.session)?;
+        Ok(())
+    }
+
+    /// Estimate the full request size (optimized prompt + history) and run
+    /// compaction through the provider when over budget. Compaction failure
+    /// returns a clear error and preserves the session; requests are never
+    /// sent oversized.
+    async fn compact_if_needed(
+        &mut self,
+        optimized: &crate::optimizer::OptimizedPrompt,
+    ) -> Result<()> {
+        let (name, endpoint) = self.resolve_endpoint()?;
+        let model = self.resolve_model(&name, &endpoint, optimized.report.estimated_tokens)?;
+        let budget = self.request_budget(&name, &model)?;
+        let instructions = crate::tools::tool_use_system_instruction(
+            self.effort,
+            self.goal_prompt_state().as_ref(),
+        );
+        let fixed = crate::optimizer::estimate_tokens(&instructions)
+            + self
+                .active_skill
+                .as_ref()
+                .map_or(0, |s| crate::optimizer::estimate_tokens(&s.prompt))
+            + optimized.report.estimated_tokens;
+        let estimate = |runtime: &Self| {
+            fixed + crate::context::messages_tokens(&runtime.session_history_messages())
+        };
+        if crate::core::context_should_compact(estimate(self), budget) {
+            self.compact_session().await?;
+        }
+        if estimate(self) > budget {
+            anyhow::bail!("essential current context exceeds the {budget}-token input budget; session preserved; narrow the request or increase routing.input_token_budget");
+        }
         Ok(())
     }
 
@@ -395,6 +507,7 @@ impl Runtime {
         let worker_model = self
             .resolve_model_override()
             .unwrap_or_else(|| plan.worker_model.clone());
+        let worker_model = crate::providers::normalize_model_for_endpoint(&endpoint, &worker_model);
 
         print_prompt_preview(
             endpoint_name,
@@ -415,10 +528,14 @@ impl Runtime {
         );
 
         self.session.push("user", prompt);
+        self.save_session()?;
 
         let adapter = adapter_for(endpoint.provider.clone());
         let evaluation_prompt =
             build_evaluation_prompt(&optimized.text, optimized.report.estimated_tokens);
+        if !self.count_provider_turn()? {
+            return Ok(());
+        }
         let evaluation = collect_chat(
             adapter.as_ref(),
             &endpoint,
@@ -429,31 +546,20 @@ impl Runtime {
                     content: evaluation_prompt,
                 }],
                 max_tokens: Some(512),
+                session_id: Some(self.session.id.clone()),
             },
         )
         .await?;
 
-        if worker_model == plan.evaluator_model {
-            ui::print_markdown(&evaluation);
-            println!();
-            self.session
-                .push("assistant", format!("Counsel evaluation:\n{evaluation}"));
-            SessionStore::new(&self.store).save(&self.session)?;
-            return Ok(());
-        }
+        self.session
+            .push("assistant", format!("Counsel evaluation:\n{evaluation}"));
 
+        // Counsel workers run through the same tool/context/goal path as
+        // other action modes, even when evaluator and worker share a model.
         let worker_prompt = build_worker_prompt(&optimized.text, &evaluation, plan.task);
-        let request = ChatRequest {
-            model: worker_model,
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: worker_prompt,
-            }],
-            max_tokens: Some(4096),
-        };
-        validate_chat_request(&request)?;
-
-        let assistant_text = self.generate(&endpoint, request).await?;
+        let assistant_text = self
+            .run_worker_with_tools(&worker_prompt, &endpoint, &worker_model)
+            .await?;
         ui::print_markdown(&assistant_text);
         println!();
 
@@ -463,8 +569,69 @@ impl Runtime {
             "assistant",
             format!("Counsel evaluation:\n{evaluation}\n\nResponse:\n{assistant_text}"),
         );
-        SessionStore::new(&self.store).save(&self.session)?;
+        self.save_session()?;
         Ok(())
+    }
+
+    /// Run a counsel worker through the shared tool loop so it can read,
+    /// write, and execute like other action modes instead of returning a
+    /// text-only response.
+    async fn run_worker_with_tools(
+        &mut self,
+        worker_prompt: &str,
+        endpoint: &EndpointConfig,
+        worker_model: &str,
+    ) -> Result<String> {
+        if !self.tool_use {
+            // Chat-only counsel workers still count as provider turns toward
+            // the goal budget and see the same bounded session context.
+            if !self.count_provider_turn()? {
+                return Ok("Execution paused; session checkpoint retained.".to_string());
+            }
+            let mut messages = self.session_history_messages();
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: worker_prompt.to_string(),
+            });
+            let request = ChatRequest {
+                model: worker_model.to_string(),
+                messages,
+                max_tokens: Some(4096),
+                session_id: Some(self.session.id.clone()),
+            };
+            validate_chat_request(&request)?;
+            return self.generate(endpoint, request).await;
+        }
+        let history = self.session_history_messages();
+        self.session.push("user", worker_prompt);
+        self.save_session()?;
+        let skill_prompt = self.active_skill.as_ref().map(|s| s.prompt.clone());
+        let goal = self.goal_prompt_state();
+        let session_id = self.session.id.clone();
+        crate::tools::run_tool_loop(
+            worker_prompt,
+            &self.sandbox,
+            self.sandbox.project_root(),
+            endpoint,
+            worker_model,
+            crate::tools::ToolLoopPromptContext {
+                history,
+                skill_prompt,
+                effort: self.effort,
+                goal,
+                session_id: Some(session_id),
+            },
+            &mut LoopHost {
+                budget: self.request_budget(&endpoint.name, worker_model)?,
+                goal_running: self.session.goal.as_ref().is_some_and(|g| g.is_active()),
+                store: &self.store,
+                session: &mut self.session,
+                pause_reason: &mut self.goal_pause_reason,
+                had_action: &mut self.turn_had_action,
+                dry_run: self.dry_run,
+            },
+        )
+        .await
     }
 
     /// Process apply mode for the given assistant text: extract `path=` blocks,
@@ -498,28 +665,284 @@ impl Runtime {
     }
 
     /// Build a bounded list of prior session messages to inject into the next
-    /// prompt. Returns user/assistant pairs from the current session, excluding
-    /// the most recent user message (which is added separately as the new turn).
+    /// prompt. Starts after the compaction summary index, keeps system
+    /// summaries visible so compaction stays continuous, and maps stored
+    /// tool results onto user-role messages for the provider.
     fn session_history_messages(&self) -> Vec<ChatMessage> {
-        let limit = self.config.routing.history_turns;
-        if limit == 0 || self.session.messages.is_empty() {
-            return Vec::new();
+        crate::context::session_history(&self.session)
+    }
+
+    pub async fn compact_session(&mut self) -> Result<String> {
+        let (name, endpoint) = self.resolve_endpoint()?;
+        let model = self.resolve_model(&name, &endpoint, 0)?;
+        let budget = self.request_budget(&name, &model)?;
+        crate::context::compact_session(&mut self.session, &self.store, &endpoint, &model, budget)
+            .await
+    }
+
+    fn request_budget(&self, endpoint: &str, model: &str) -> Result<usize> {
+        let cache = ModelCache::load(&self.store)?;
+        let window = cache
+            .available_for(endpoint)
+            .find(|m| m.id == model)
+            .and_then(|m| m.context_window)
+            .unwrap_or(0);
+        Ok(self
+            .config
+            .routing
+            .input_token_budget
+            .max(1)
+            .min(crate::core::context_budget_for_window(window)))
+    }
+
+    /// Goal status text for `/goal` with no model call.
+    pub fn goal_status_text(&self) -> String {
+        let Some(goal) = self.session.goal.as_ref() else {
+            return "no goal; start one with /goal <objective>".to_string();
+        };
+        let remaining = goal.max_steps.saturating_sub(goal.steps_used);
+        format!(
+            "goal: {}\nstatus: {}\nprogress: {}\nevidence: {}\nsteps: {}/{} used, {} remaining\nresume: /goal resume  pause: /goal pause  cancel: /goal cancel",
+            goal.objective,
+            goal.status,
+            if goal.progress.is_empty() { "(none yet)" } else { &goal.progress },
+            if goal.evidence.is_empty() { "(none yet)" } else { &goal.evidence },
+            goal.steps_used,
+            goal.max_steps,
+            remaining
+        )
+    }
+
+    /// `/goal <objective>`: persist a new goal and start its run. Replacing
+    /// an active/paused/blocked goal is rejected; cancel first.
+    pub async fn start_goal(&mut self, objective: &str) -> Result<String> {
+        if objective.trim().is_empty() {
+            return Err(anyhow!("provide an objective: /goal <objective>"));
         }
-        // Exclude the last message if it is the current user prompt already pushed.
-        // We take messages before the final user turn that is about to be sent.
-        let msgs = &self.session.messages;
-        // The caller pushes the user prompt *after* calling this, so we use all
-        // messages currently in the session, bounded to 2*limit (limit turns).
-        let take = msgs.len().min(limit.saturating_mul(2));
-        let start = msgs.len().saturating_sub(take);
-        msgs[start..]
-            .iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            })
-            .collect()
+        if let Some(goal) = self.session.goal.as_ref() {
+            if !goal.is_replaceable() {
+                return Err(anyhow!(
+                    "a {} goal already exists; cancel it first with /goal cancel",
+                    goal.status
+                ));
+            }
+        }
+        self.session.goal = Some(crate::sessions::GoalState::new(objective.trim()));
+        self.save_session()?;
+        println!(
+            "{}",
+            "goal started (Ctrl+C pauses; /goal pause also works)".cyan()
+        );
+        self.run_goal_loop().await
+    }
+
+    /// `/goal resume`: grant another bounded batch of steps and continue.
+    pub async fn resume_goal(&mut self) -> Result<String> {
+        let budget = {
+            let Some(goal) = self.session.goal.as_mut() else {
+                return Err(anyhow!(
+                    "no goal to resume; start one with /goal <objective>"
+                ));
+            };
+            if goal.is_active() {
+                return Ok("goal is already running".to_string());
+            }
+            if matches!(
+                goal.status_code(),
+                crate::core::GOAL_COMPLETED | crate::core::GOAL_CANCELLED
+            ) {
+                return Err(anyhow!(
+                    "goal is {}; start a new one with /goal <objective>",
+                    goal.status
+                ));
+            }
+            goal.set_status(crate::core::GOAL_ACTIVE);
+            goal.steps_used = 0;
+            goal.max_steps = crate::core::goal_default_max_steps();
+            goal.max_steps
+        };
+        self.save_session()?;
+        println!(
+            "{}",
+            format!("goal resumed with a fresh budget of up to {budget} steps").cyan()
+        );
+        self.run_goal_loop().await
+    }
+
+    /// `/goal pause`: mark an active goal paused; no model call.
+    pub fn pause_goal(&mut self) -> Result<String> {
+        let message = {
+            let Some(goal) = self.session.goal.as_mut() else {
+                return Err(anyhow!("no goal to pause"));
+            };
+            let next =
+                crate::core::goal_transition(goal.status_code(), crate::core::GOAL_EVENT_PAUSE);
+            goal.set_status(next);
+            format!("goal status: {}", goal.status)
+        };
+        self.save_session()?;
+        Ok(message)
+    }
+
+    /// `/goal cancel`: mark the goal cancelled; transcript retained; no model call.
+    pub fn cancel_goal(&mut self) -> Result<String> {
+        let message = {
+            let Some(goal) = self.session.goal.as_mut() else {
+                return Err(anyhow!("no goal to cancel"));
+            };
+            let previous = goal.status_code();
+            let next = crate::core::goal_transition(previous, crate::core::GOAL_EVENT_CANCEL);
+            if next == previous {
+                return Err(anyhow!("goal is {}; nothing to cancel", goal.status));
+            }
+            goal.set_status(next);
+            "goal cancelled; transcript retained".to_string()
+        };
+        self.save_session()?;
+        Ok(message)
+    }
+
+    /// Transition the active goal through the C state machine and save.
+    fn transition_goal(&mut self, event: i32) -> Result<()> {
+        if let Some(goal) = self.session.goal.as_mut() {
+            let next = crate::core::goal_transition(goal.status_code(), event);
+            goal.set_status(next);
+        }
+        self.save_session()
+    }
+
+    /// The goal agent loop. Injects objective and progress into each
+    /// request, counts every provider turn toward the step cap, pauses on
+    /// denial/cancellation/blockers/stall, and never marks a goal complete
+    /// from a plain prose response.
+    async fn run_goal_loop(&mut self) -> Result<String> {
+        self.goal_stall = 0;
+        self.goal_pause_reason = None;
+        loop {
+            let Some(goal) = self.session.goal.as_ref() else {
+                break;
+            };
+            let status = goal.status_code();
+            if crate::core::agent_next(
+                status,
+                goal.steps_used,
+                goal.max_steps,
+                false,
+                false,
+                self.goal_stall,
+            ) != crate::core::AgentAction::Request
+            {
+                if status == crate::core::GOAL_ACTIVE {
+                    // The step cap pauses; it never marks complete.
+                    self.transition_goal(crate::core::GOAL_EVENT_STEP_LIMIT)?;
+                    let used = self
+                        .session
+                        .goal
+                        .as_ref()
+                        .map(|goal| goal.steps_used)
+                        .unwrap_or_default();
+                    let paused = format!(
+                        "goal paused: step budget exhausted ({used} steps used); /goal resume grants another batch"
+                    );
+                    println!("{}", paused.yellow());
+                    return Ok(paused);
+                }
+                break;
+            }
+            self.turn_had_action = false;
+            let continuation = self.goal_continuation_prompt();
+            // Interrupting a goal turn pauses instead of losing state; the
+            // run_prompt path already handles Ctrl+C interruption of the
+            // active provider request.
+            let turn_result = self.run_prompt(&continuation).await;
+            if let Err(error) = turn_result {
+                // Provider failure preserves state and returns control
+                // instead of terminating the shell.
+                self.transition_goal(crate::core::GOAL_EVENT_PAUSE)?;
+                let stopped = self
+                    .session
+                    .goal
+                    .as_ref()
+                    .map(|goal| format!("goal run stopped: {error} (status: {})", goal.status))
+                    .unwrap_or_else(|| format!("goal run stopped: {error}"));
+                return Ok(stopped);
+            }
+            if crate::interactive::was_interrupted() {
+                let paused =
+                    "goal paused (interrupted with Ctrl+C); /goal resume continues".to_string();
+                self.transition_goal(crate::core::GOAL_EVENT_PAUSE)?;
+                println!("{}", paused.yellow());
+                return Ok(paused);
+            }
+            if let Some(reason) = self.goal_pause_reason.take() {
+                // Denied approval pauses the goal and returns control.
+                self.transition_goal(crate::core::GOAL_EVENT_PAUSE)?;
+                let paused = format!("goal paused: {reason}");
+                println!("{}", paused.yellow());
+                return Ok(paused);
+            }
+            if self
+                .session
+                .goal
+                .as_ref()
+                .is_some_and(|goal| !goal.is_active())
+            {
+                // Completed/blocked/cancelled through goal_update; stop.
+                break;
+            }
+            if self.turn_had_action {
+                self.goal_stall = 0;
+            } else {
+                self.goal_stall += 1;
+                if crate::core::agent_next(
+                    crate::core::GOAL_ACTIVE,
+                    0,
+                    u32::MAX,
+                    false,
+                    false,
+                    self.goal_stall,
+                ) == crate::core::AgentAction::Pause
+                {
+                    let paused = "goal paused: two consecutive turns with no tool action or progress update; give a concrete next step with /goal resume".to_string();
+                    self.transition_goal(crate::core::GOAL_EVENT_PAUSE)?;
+                    println!("{}", paused.yellow());
+                    return Ok(paused);
+                }
+            }
+        }
+        let goal = self
+            .session
+            .goal
+            .as_ref()
+            .map(|goal| goal.status.clone())
+            .unwrap_or_default();
+        Ok(format!("goal loop stopped (status: {goal})"))
+    }
+
+    fn goal_continuation_prompt(&self) -> String {
+        let Some(goal) = self.session.goal.as_ref() else {
+            return String::new();
+        };
+        format!(
+            "Continue the active goal.\nObjective: {}\nStatus: {}\nProgress so far: {}\nSteps used: {}/{}\n\nTake the next concrete step toward the objective. Report state with goal_update: progress updates while working, status blocked with what you need, or completed with evidence from this session's tool results. A plain prose reply does not complete the goal.",
+            goal.objective,
+            goal.status,
+            if goal.progress.is_empty() { "(none yet)" } else { &goal.progress },
+            goal.steps_used,
+            goal.max_steps
+        )
+    }
+
+    /// Goal state mapped into the tool-loop prompt context.
+    fn goal_prompt_state(&self) -> Option<crate::tools::GoalPromptState> {
+        let goal = self.session.goal.as_ref()?;
+        Some(crate::tools::GoalPromptState {
+            objective: goal.objective.clone(),
+            status: goal.status.clone(),
+            progress: goal.progress.clone(),
+            steps_used: goal.steps_used,
+            max_steps: goal.max_steps,
+        })
     }
 
     pub fn print_models(&self) -> Result<()> {
@@ -545,7 +968,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn resolve_endpoint(&self) -> Result<(String, EndpointConfig)> {
+    pub(crate) fn resolve_endpoint(&self) -> Result<(String, EndpointConfig)> {
         let endpoint_name = self
             .endpoint_override
             .clone()
@@ -567,7 +990,7 @@ impl Runtime {
         Ok((endpoint_name, endpoint))
     }
 
-    fn resolve_model(
+    pub(crate) fn resolve_model(
         &self,
         endpoint_name: &str,
         endpoint: &EndpointConfig,
@@ -634,6 +1057,256 @@ impl Runtime {
     }
 }
 
+/// Completion evidence must correspond to this session's recorded tool
+/// results/checks, or explicitly state that no executable check applies.
+/// Comparing against `tool_result` messages only keeps the model from
+/// satisfying the check by quoting its own tool-call text back.
+fn completion_evidence_supported(evidence: &str, messages: &[SessionMessage]) -> bool {
+    let lowered = evidence.to_lowercase();
+    if [
+        "no executable check",
+        "no check",
+        "cannot verify",
+        "can't verify",
+        "unable to verify",
+        "not verifiable",
+        "manual review",
+    ]
+    .iter()
+    .any(|phrase| lowered.contains(phrase))
+    {
+        return true;
+    }
+    let tokens: std::collections::HashSet<String> = evidence
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.' && ch != '/')
+        .filter(|token| token.len() >= 4)
+        .map(|token| token.to_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    messages
+        .iter()
+        .filter(|message| {
+            message.role == "tool_result"
+                && !message.content.contains("Tool result for 'goal_update'")
+        })
+        .any(|message| {
+            let content = message.content.to_lowercase();
+            tokens.iter().any(|token| content.contains(token.as_str()))
+        })
+}
+
+/// Host adapter between the tool loop and the runtime. Records the
+/// transcript (with atomic saves), applies dry-run, forwards approval to the
+/// human, and validates goal_update actions against the C core.
+struct LoopHost<'a> {
+    store: &'a ConfigStore,
+    session: &'a mut Session,
+    pause_reason: &'a mut Option<String>,
+    had_action: &'a mut bool,
+    dry_run: bool,
+    goal_running: bool,
+    budget: usize,
+}
+
+#[async_trait::async_trait]
+impl crate::tools::ToolHost for LoopHost<'_> {
+    fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    fn approve(&mut self, action: &str) -> bool {
+        let approved = crate::permissions::confirm(action);
+        if !approved {
+            *self.pause_reason = Some("user denied approval".to_string());
+        }
+        approved
+    }
+
+    /// Validate a `goal_update` action from the model. Only accepted while a
+    /// goal is running; completion requires evidence from this session's
+    /// tool results or a reason why no executable check applies.
+    fn goal_update(&mut self, arguments: &serde_json::Value) -> Result<String, String> {
+        let Some(goal) = self.session.goal.as_mut() else {
+            return Err("no active goal; goal_update is only valid during a goal run".to_string());
+        };
+        if !goal.is_active() {
+            return Err(format!(
+                "goal is {}, not active; goal_update is only valid while the goal runs",
+                goal.status
+            ));
+        }
+        let status = arguments
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let requested = crate::core::goal_parse_status(status).ok_or_else(|| {
+            format!("invalid goal status '{status}'; use active, blocked, or completed")
+        })?;
+        let event =
+            match requested {
+                crate::core::GOAL_ACTIVE => None,
+                crate::core::GOAL_BLOCKED => Some(crate::core::GOAL_EVENT_BLOCK),
+                crate::core::GOAL_COMPLETED => Some(crate::core::GOAL_EVENT_COMPLETE),
+                _ => return Err(
+                    "paused/cancelled/none are user controls; use active, blocked, or completed"
+                        .to_string(),
+                ),
+            };
+        let progress = arguments
+            .get("progress")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let evidence = arguments
+            .get("evidence")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if requested == crate::core::GOAL_COMPLETED && evidence.trim().is_empty() {
+            return Err(
+                "completing a goal requires nonempty evidence: reference actual tool results or checks from this session, or explain why no executable check applies"
+                    .to_string(),
+            );
+        }
+        if requested == crate::core::GOAL_COMPLETED
+            && !completion_evidence_supported(evidence, &self.session.messages)
+        {
+            return Err(
+                "completion evidence must reference tool results or checks recorded in this session, or state why no executable check applies"
+                    .to_string(),
+            );
+        }
+        goal.progress = progress.to_string();
+        if !evidence.is_empty() {
+            goal.evidence = evidence.to_string();
+        }
+        let (saved_status, saved_progress, saved_evidence, saved_steps, saved_max) = (
+            goal.status.clone(),
+            goal.progress.clone(),
+            goal.evidence.clone(),
+            goal.steps_used,
+            goal.max_steps,
+        );
+        if let Some(event) = event {
+            let next = crate::core::goal_transition(goal.status_code(), event);
+            goal.set_status(next);
+            SessionStore::new(self.store)
+                .save(self.session)
+                .map_err(|error| error.to_string())?;
+            match requested {
+                crate::core::GOAL_COMPLETED => {
+                    // The reported outcome is the model's claim backed by
+                    // the evidence string; not an independent proof.
+                    return Ok(format!(
+                        "goal marked completed. Evidence recorded: {saved_evidence}"
+                    ));
+                }
+                crate::core::GOAL_BLOCKED => {
+                    return Ok(format!(
+                        "goal marked blocked: {saved_progress}. The user will decide how to proceed."
+                    ));
+                }
+                _ => {}
+            }
+        } else {
+            SessionStore::new(self.store)
+                .save(self.session)
+                .map_err(|error| error.to_string())?;
+        }
+        *self.had_action = true;
+        Ok(format!(
+            "goal status: {saved_status} (steps {saved_steps}/{saved_max})"
+        ))
+    }
+
+    async fn prepare_request(
+        &mut self,
+        endpoint: &EndpointConfig,
+        request: &mut ChatRequest,
+    ) -> Result<()> {
+        if crate::context::messages_tokens(&request.messages) > self.budget {
+            let old_history = crate::context::session_history(self.session).len();
+            let prefix = request
+                .messages
+                .len()
+                .checked_sub(old_history)
+                .ok_or_else(|| anyhow!("context/transcript mismatch; session preserved"))?;
+            let old_start = self.session.context_start_index;
+            let old_summary = usize::from(self.session.summary.is_some());
+            crate::context::compact_session(
+                self.session,
+                self.store,
+                endpoint,
+                &request.model,
+                self.budget,
+            )
+            .await?;
+            let covered = self.session.context_start_index - old_start;
+            request
+                .messages
+                .drain(prefix..prefix + old_summary + covered);
+            if let Some(summary) = self.session.summary.as_ref() {
+                request.messages.insert(
+                    prefix,
+                    ChatMessage {
+                        role: "system".into(),
+                        content: format!("Previous conversation summary:\n{summary}"),
+                    },
+                );
+            }
+        }
+        if crate::context::messages_tokens(&request.messages) > self.budget {
+            anyhow::bail!(
+                "essential current context exceeds the {}-token input budget; session preserved",
+                self.budget
+            );
+        }
+        Ok(())
+    }
+
+    fn before_request(&mut self) -> Result<bool> {
+        if self.stopped() {
+            return Ok(false);
+        }
+        if let Some(goal) = self.session.goal.as_mut().filter(|g| g.is_active()) {
+            if crate::core::agent_next(
+                goal.status_code(),
+                goal.steps_used,
+                goal.max_steps,
+                false,
+                false,
+                0,
+            ) != crate::core::AgentAction::Request
+            {
+                goal.set_status(crate::core::goal_transition(
+                    goal.status_code(),
+                    crate::core::GOAL_EVENT_STEP_LIMIT,
+                ));
+                *self.pause_reason =
+                    Some("step budget exhausted; /goal resume grants another batch".into());
+                SessionStore::new(self.store).save(self.session)?;
+                return Ok(false);
+            }
+            goal.steps_used += 1;
+            SessionStore::new(self.store).save(self.session)?;
+        }
+        Ok(true)
+    }
+
+    fn stopped(&self) -> bool {
+        self.pause_reason.is_some()
+            || (self.goal_running && self.session.goal.as_ref().is_some_and(|g| !g.is_active()))
+    }
+
+    fn record_transcript(&mut self, role: &str, content: &str) -> Result<()> {
+        self.session.push(role, content);
+        if role == "tool_result" {
+            *self.had_action = true;
+        }
+        SessionStore::new(self.store).save(self.session)
+    }
+}
+
 async fn collect_chat(
     adapter: &dyn crate::providers::ProviderAdapter,
     endpoint: &EndpointConfig,
@@ -693,6 +1366,14 @@ const DOC_PAGES: &[DocPage] = &[
     DocPage {
         title: "Commands",
         body: include_str!("../docs/commands.md"),
+    },
+    DocPage {
+        title: "Goals",
+        body: include_str!("../docs/goals.md"),
+    },
+    DocPage {
+        title: "OpenCode Go",
+        body: include_str!("../docs/opencode-go.md"),
     },
     DocPage {
         title: "Apply Mode",
@@ -947,7 +1628,7 @@ fn handle_config(command: ConfigCommand, store: &ConfigStore, config: &AppConfig
     Ok(())
 }
 
-fn handle_session(command: SessionCommand, store: &ConfigStore) -> Result<()> {
+async fn handle_session(command: SessionCommand, store: &ConfigStore) -> Result<()> {
     let sessions = SessionStore::new(store);
     match command {
         SessionCommand::List => {
@@ -965,11 +1646,59 @@ fn handle_session(command: SessionCommand, store: &ConfigStore) -> Result<()> {
             let session = if let Some(id) = id {
                 sessions.load(&id)?
             } else {
+                // Latest for the current workspace, like `/resume`.
+                let current = project_root();
                 sessions
-                    .latest()?
-                    .ok_or_else(|| anyhow!("no saved sessions yet"))?
+                    .list()?
+                    .into_iter()
+                    .find(|session| {
+                        session.workspace_root.as_deref() == Some(current.as_path())
+                            || session.workspace_root.is_none()
+                    })
+                    .ok_or_else(|| anyhow!("no saved sessions in this workspace yet"))?
             };
-            println!("{}", serde_yaml::to_string(&session)?);
+            // Actual resume: enter the interactive loop with the loaded
+            // session instead of printing YAML and exiting.
+            let config = store.load()?;
+            let sandbox = Sandbox::new(config.ui.mode, project_root(), Vec::new());
+            let effort = config.ui.effort;
+            let mode = config.ui.mode;
+            let mut runtime = Runtime::new(
+                config,
+                store.clone(),
+                RuntimeOptions {
+                    endpoint_override: None,
+                    model_override: None,
+                    mode,
+                    effort,
+                    apply: false,
+                    dry_run: false,
+                    sandbox,
+                    tool_use: true,
+                },
+            )?;
+            if let Some(session_root) = session.workspace_root.as_ref() {
+                if session_root != &project_root() {
+                    println!(
+                        "{}",
+                        format!(
+                            "session {} belongs to {}; launch cntx in that directory to resume it",
+                            session.id,
+                            session_root.display()
+                        )
+                        .yellow()
+                    );
+                    return Ok(());
+                }
+            } else {
+                println!(
+                    "{}",
+                    "note: this session predates workspace tracking; resuming in the current workspace"
+                        .yellow()
+                );
+            }
+            runtime.session = session;
+            interactive::run(&mut runtime).await?;
         }
         SessionCommand::Export { id, output } => {
             sessions.export(&id, &output)?;
@@ -1833,10 +2562,8 @@ fn handle_provider(
             config.primary_endpoint = Some(name.clone());
             store.save(config)?;
             println!("created endpoint {name} from preset and set it primary");
-            println!(
-                "add a key with: cntx api-key --add --provider {}",
-                provider.provider_kind().as_str()
-            );
+            println!("add a key with: cntx api-key add --provider {name}");
+            println!("then refresh models with: cntx --refresh-models");
             Ok(())
         }
     }
@@ -1880,6 +2607,17 @@ fn builtin_provider_presets() -> Vec<CustomProvider> {
             "https://api.fireworks.ai/inference/v1",
             "FIREWORKS_API_KEY",
             "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        ),
+        // OpenCode Go subscription (https://opencode.ai/docs/go/). Protocol
+        // routing per model family lives in the C core; glm-5.3-flash is
+        // confirmed in the fetched model list. Never falls back to another
+        // provider's key.
+        provider_preset(
+            "opencode-go",
+            CustomProviderKind::OpenAiCompatible,
+            "https://opencode.ai/zen/go/v1",
+            "OPENCODE_GO_API_KEY",
+            "glm-5.3-flash",
         ),
     ]
 }

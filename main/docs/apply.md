@@ -54,7 +54,13 @@ cntx --apply --dry-run --mode allow "preview the router test"
 ```
 
 In interactive mode, `/checklist` shows the last apply result until the next apply
-run. `/dry-run` toggles preview-only apply behavior.
+run. `/dry-run` toggles dry-run behavior: it prevents both file mutations and
+shell execution.
+
+`--apply` one-shot prompts use this apply path by default; explicit `--tool-use`
+selects the tool loop instead. When a write needs approval, apply mode asks the
+same explicit approval boundary as other tools (`y`/`yes`); denial leaves files
+untouched.
 
 ## Safety
 

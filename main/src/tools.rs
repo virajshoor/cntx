@@ -2,27 +2,23 @@
 //!
 //! When tool mode is active, the model can call tools like `read`, `write`,
 //! `edit`, `bash`, `glob`, and `grep`. Tool calls are parsed from the model's
-//! response, executed, and the results are fed back as a follow-up message.
-//! The loop continues until the model produces a final text response with no
-//! tool calls.
+//! response, executed through the shared validation/permission boundary in
+//! the C core, and the results are fed back as follow-up messages. The loop
+//! continues until the model produces a final text response with no tool
+//! calls.
+//!
+//! Every tool passes the same order:
+//! validate → containment/exclusions → permission policy → dry-run block →
+//! approval → execute once → bounded result → transcript persistence.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use wait_timeout::ChildExt;
 
 use crate::sandbox::Sandbox;
-
-/// Maximum number of tool call iterations per prompt.
-const MAX_TOOL_ITERATIONS: usize = 25;
-
-/// Timeout for shell commands executed by the tool-use loop (seconds).
-const SHELL_TIMEOUT_SECS: u64 = 60;
 
 /// A tool definition sent to the model.
 #[derive(Debug, Serialize)]
@@ -33,7 +29,7 @@ pub struct ToolDefinition {
 }
 
 /// A tool call parsed from the model's response.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
@@ -44,6 +40,20 @@ pub struct ToolLoopPromptContext {
     pub history: Vec<crate::providers::ChatMessage>,
     pub skill_prompt: Option<String>,
     pub effort: crate::config::Effort,
+    /// Goal objective/status injected into each request while a goal runs.
+    pub goal: Option<GoalPromptState>,
+    /// Stable conversation id for the OpenCode Go session header.
+    pub session_id: Option<String>,
+}
+
+/// Goal information injected into tool-loop requests.
+#[derive(Clone)]
+pub struct GoalPromptState {
+    pub objective: String,
+    pub status: String,
+    pub progress: String,
+    pub steps_used: u32,
+    pub max_steps: u32,
 }
 
 /// The result of executing a tool.
@@ -54,15 +64,56 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// A validated `goal_update` action from the model.
+#[derive(Debug, Clone)]
+pub struct GoalUpdate {
+    pub status: String,
+    pub progress: String,
+    pub evidence: String,
+}
+
+/// Host callbacks the tool loop needs. The runtime implements this so the
+/// loop itself stays free of session/persistence details.
+#[async_trait::async_trait]
+pub trait ToolHost: Send {
+    async fn prepare_request(
+        &mut self,
+        _endpoint: &crate::config::EndpointConfig,
+        _request: &mut crate::providers::ChatRequest,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// True when mutations and commands must be blocked (dry-run).
+    fn dry_run(&self) -> bool;
+    /// Ask the human; execute only after explicit yes.
+    fn approve(&mut self, action: &str) -> bool;
+    /// Handle a validated goal_update action while a goal runs.
+    fn goal_update(&mut self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("no active goal; goal_update is only valid during a goal run".to_string())
+    }
+    /// Persist a transcript entry (assistant tool request or tool result).
+    fn record_transcript(&mut self, _role: &str, _content: &str) -> Result<()> {
+        Ok(())
+    }
+    /// Checkpoint and count each provider turn before starting it.
+    fn before_request(&mut self) -> Result<bool> {
+        Ok(true)
+    }
+    fn stopped(&self) -> bool {
+        false
+    }
+}
+
 /// Get the tool definitions for the model.
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read",
-            description: "Read the contents of a file. Use this when you need to examine the contents of an existing file.",
+            description: "Read up to 24KB of a file. Use optional byte offset to continue reading.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "offset": {"type": "integer", "minimum": 0, "description": "Optional byte offset for large files"},
                     "path": {
                         "type": "string",
                         "description": "The path of the file to read (relative to project root or absolute)"
@@ -91,7 +142,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "edit",
-            description: "Edit a file by finding and replacing text. Use this for targeted changes to existing files without rewriting the entire file.",
+            description: "Edit a file by finding and replacing text. The old_string must match exactly once. Use this for targeted changes to existing files.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -101,7 +152,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "The exact text to find and replace (must match the file exactly)"
+                        "description": "The exact text to find and replace (must match the file exactly once)"
                     },
                     "new_string": {
                         "type": "string",
@@ -113,7 +164,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "bash",
-            description: "Run a shell command. Use this to execute commands like git, cargo, npm, ls, etc. The command runs in the project root directory.",
+            description: "Run a shell command. Use this to execute commands like git, cargo, npm, ls, etc. The command runs in the project root directory with a 60s default timeout.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -165,7 +216,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 /// Build the tool-use system instruction that tells the model how to call tools.
-pub fn tool_use_system_instruction(effort: crate::config::Effort) -> String {
+pub fn tool_use_system_instruction(
+    effort: crate::config::Effort,
+    goal: Option<&GoalPromptState>,
+) -> String {
     let defs = tool_definitions();
     let mut instruction = format!(
         "You are Cntx Code, a coding assistant running locally in the user's terminal. \
@@ -191,12 +245,30 @@ Available tools:\n",
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default()
         ));
     }
+    if let Some(goal) = goal {
+        instruction.push_str(&format!(
+            "\nYou are working toward a persistent goal.\n\
+Objective: {}\n\
+Goal status: {} (steps used {}/{})\n\
+Progress so far: {}\n\n\
+Report goal state with the `goal_update` tool:\n\
+<tool>{{\"name\":\"goal_update\",\"arguments\":{{\"status\":\"active|blocked|completed\",\"progress\":\"...\",\"evidence\":\"...\"}}}}</tool>\n\
+- `completed` requires nonempty evidence referring to actual tool results or checks from this session.\n\
+- If you cannot proceed, use status `blocked` and explain what you need.\n\
+- A plain prose response does not complete the goal; only goal_update can.\n",
+            goal.objective,
+            goal.status,
+            goal.steps_used,
+            goal.max_steps,
+            if goal.progress.is_empty() { "(none yet)" } else { &goal.progress },
+        ));
+    }
     instruction.push_str(
         "\nTo call a tool, output a JSON block on its own line wrapped in <tool> tags.\n\
          The JSON must have \"name\" and \"arguments\" keys. Examples:\n\
          <tool>{\"name\":\"read\",\"arguments\":{\"path\":\"src/main.rs\"}}</tool>\n\
          <tool>{\"name\":\"write\",\"arguments\":{\"path\":\"script.py\",\"content\":\"print('hi')\"}}</tool>\n\
-         <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"python3 script.py\"}}</tool>\n\
+         <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"python3 script.py\",\"description\":\"run script\"}}</tool>\n\
          <tool>{\"name\":\"glob\",\"arguments\":{\"pattern\":\"src/**/*.rs\"}}</tool>\n\
          <tool>{\"name\":\"grep\",\"arguments\":{\"pattern\":\"TODO\",\"path\":\"*.rs\"}}</tool>\n\n\
          Output one tool call at a time. After receiving the tool result, you can call another tool or provide your final response. \
@@ -209,75 +281,165 @@ Available tools:\n",
 /// Handles both the standard format `{"name":"read","arguments":{"path":"..."}}`
 /// and the common variant where args are at the top level:
 /// `{"name":"bash","command":"ls -la"}`.
-pub fn parse_tool_calls(text: &str) -> Vec<ToolCall> {
+///
+/// A malformed block is an error, not a silent skip: an unclosed `<tool>`
+/// tag or invalid JSON returns a descriptive error so the loop can feed a
+/// correction back to the model.
+pub fn parse_tool_calls(text: &str) -> Result<Vec<ToolCall>> {
     let mut calls = Vec::new();
     let mut remaining = text;
 
     while let Some(start) = remaining.find("<tool>") {
         let after_start = &remaining[start + 6..];
-        if let Some(end) = after_start.find("</tool>") {
-            let json_str = &after_start[..end];
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let name = value
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if !name.is_empty() {
-                    // Standard: arguments nested under "arguments" key.
-                    // Fallback: treat all top-level keys except "name" as
-                    // arguments (handles models that flatten the structure).
-                    let arguments = if let Some(args) = value.get("arguments") {
-                        args.clone()
-                    } else {
-                        let mut args = serde_json::Map::new();
-                        if let Some(obj) = value.as_object() {
-                            for (key, val) in obj {
-                                if key != "name" {
-                                    args.insert(key.clone(), val.clone());
-                                }
-                            }
-                        }
-                        serde_json::Value::Object(args)
-                    };
-                    calls.push(ToolCall { name, arguments });
+        let Some(end) = after_start.find("</tool>") else {
+            return Err(anyhow!(
+                "a <tool> block has no closing </tool> tag; repeat the call as one complete <tool>{{...}}</tool> block"
+            ));
+        };
+        let json_str = &after_start[..end];
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
+            return Err(anyhow!(
+                "a <tool> block contained invalid JSON; repeat the call as one complete <tool>{{...}}</tool> block with valid JSON"
+            ));
+        };
+        let name = value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            return Err(anyhow!(
+                "a <tool> block is missing its \"name\" key; include both \"name\" and \"arguments\""
+            ));
+        }
+        // Standard: arguments nested under "arguments" key.
+        // Fallback: treat all top-level keys except "name" as arguments
+        // (handles models that flatten the structure).
+        let arguments = if let Some(args) = value.get("arguments") {
+            args.clone()
+        } else {
+            let mut args = serde_json::Map::new();
+            if let Some(obj) = value.as_object() {
+                for (key, val) in obj {
+                    if key != "name" {
+                        args.insert(key.clone(), val.clone());
+                    }
                 }
             }
-            remaining = &after_start[end + 7..];
-        } else {
-            break;
+            serde_json::Value::Object(args)
+        };
+        calls.push(ToolCall { name, arguments });
+        remaining = &after_start[end + 7..];
+    }
+
+    Ok(calls)
+}
+
+/// All tools pass through the same validation and permission boundary.
+pub fn execute_tool(
+    call: &ToolCall,
+    sandbox: &Sandbox,
+    project_root: &Path,
+    dry_run: bool,
+    approve: &mut dyn FnMut(&str) -> bool,
+) -> ToolResult {
+    if let Some(result) = authorize_tool(call, sandbox, project_root, dry_run, approve) {
+        return result;
+    }
+    execute_authorized(call, sandbox, project_root)
+}
+
+fn authorize_tool(
+    call: &ToolCall,
+    sandbox: &Sandbox,
+    project_root: &Path,
+    dry_run: bool,
+    approve: &mut dyn FnMut(&str) -> bool,
+) -> Option<ToolResult> {
+    use crate::permissions::{Operation, PermissionDecision};
+    // 1. Validate name and arguments (C core).
+    if let Err(message) = crate::core::tool_validate(&call.name, &call.arguments) {
+        return Some(tool_error(call, message));
+    }
+
+    // 2. Resolve paths and containment/exclusions.
+    let target = call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(|path| resolve_path(path, project_root));
+    let verdict = sandbox.evaluate(operation_for(&call.name), target.as_deref());
+
+    // 3. Permission policy (C core): containment denial always wins first.
+    if verdict.decision == PermissionDecision::Deny {
+        return Some(tool_error(call, format!("Blocked: {}", verdict.reason)));
+    }
+
+    // 4. Dry-run blocks mutations and shell execution.
+    if dry_run
+        && matches!(
+            operation_for(&call.name),
+            Operation::WriteFile | Operation::Shell
+        )
+    {
+        return Some(tool_error(
+            call,
+            "Dry run: action was NOT executed. Describe the proposed changes instead.",
+        ));
+    }
+
+    // 5. Approval when the policy asks.
+    if verdict.decision == PermissionDecision::Ask {
+        let detail = format!("{} {}", call.name, call.arguments);
+        if !approve(&detail) {
+            return Some(tool_error(
+                call,
+                "User denied approval. Do not retry or work around this denial.",
+            ));
         }
     }
 
-    calls
+    None
 }
 
-/// Execute a tool call and return the result.
-pub fn execute_tool(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
+fn execute_authorized(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
+    // Approval can take arbitrary time: recheck containment immediately before I/O.
+    if matches!(call.name.as_str(), "write" | "edit") {
+        let target = resolve_path(
+            call.arguments["path"].as_str().unwrap_or_default(),
+            project_root,
+        );
+        let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
+        if verdict.decision == crate::permissions::PermissionDecision::Deny {
+            return tool_error(call, format!("Blocked: {}", verdict.reason));
+        }
+    }
+    // 6-7. Execute once and capture a bounded result.
     match call.name.as_str() {
         "read" => execute_read(call, project_root),
-        "write" => execute_write(call, sandbox, project_root),
-        "edit" => execute_edit(call, sandbox, project_root),
-        "bash" => execute_bash(call, sandbox, project_root),
+        "write" => execute_write(call, project_root),
+        "edit" => execute_edit(call, project_root),
+        "bash" => execute_bash(call, project_root),
         "glob" => execute_glob(call, project_root),
         "grep" => execute_grep(call, project_root),
-        _ => ToolResult {
-            tool_name: call.name.clone(),
-            output: format!("unknown tool: {}", call.name),
-            is_error: true,
-        },
+        _ => tool_error(call, format!("unknown tool: {}", call.name)),
     }
 }
 
-/// Returns true when the sandbox verdict allows the operation. In the
-/// tool-use loop there is no interactive prompt, so `Ask` is treated as
-/// `Allow` to prevent the model from being blocked by every mode except
-/// `Allow`.
-fn verdict_allows(verdict: &crate::sandbox::SandboxVerdict) -> bool {
-    matches!(
-        verdict.decision,
-        crate::permissions::PermissionDecision::Allow | crate::permissions::PermissionDecision::Ask
-    )
+fn operation_for(name: &str) -> crate::permissions::Operation {
+    match name {
+        "write" | "edit" => crate::permissions::Operation::WriteFile,
+        "bash" => crate::permissions::Operation::Shell,
+        _ => crate::permissions::Operation::ReadFile,
+    }
+}
+
+fn tool_error(call: &ToolCall, message: impl Into<String>) -> ToolResult {
+    ToolResult {
+        tool_name: call.name.clone(),
+        output: message.into(),
+        is_error: true,
+    }
 }
 
 fn execute_read(call: &ToolCall, project_root: &Path) -> ToolResult {
@@ -287,32 +449,52 @@ fn execute_read(call: &ToolCall, project_root: &Path) -> ToolResult {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let target = resolve_path(path, project_root);
-
-    match std::fs::read_to_string(&target) {
-        Ok(content) => {
-            let line_count = content.lines().count();
-            let size = content.len();
+    // Reads respect the same secret exclusions as grep/glob so the model
+    // cannot pull credentials from a differently-named path either.
+    if crate::blocklist::is_secret_file(&target) {
+        return ToolResult {
+            tool_name: "read".to_string(),
+            output: format!(
+                "Blocked: {} is a secret/credential file and cannot be read.",
+                target.display()
+            ),
+            is_error: true,
+        };
+    }
+    let offset = call
+        .arguments
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    match crate::core::file_read(&target, offset, crate::core::tool_read_limit()) {
+        Ok((content, truncated)) => {
+            let mut text = format!(
+                "File: {}\nLines: {}\nSize: {} bytes\n\n{}",
+                target.display(),
+                content.lines().count(),
+                content.len(),
+                content
+            );
+            if truncated {
+                text.push_str(
+                    "\n[File continues past this window; pass a byte offset to read more.]",
+                );
+            }
             ToolResult {
                 tool_name: "read".to_string(),
-                output: format!(
-                    "File: {}\nLines: {}\nSize: {} bytes\n\n{}",
-                    target.display(),
-                    line_count,
-                    size,
-                    content
-                ),
+                output: text,
                 is_error: false,
             }
         }
-        Err(e) => ToolResult {
+        Err(message) => ToolResult {
             tool_name: "read".to_string(),
-            output: format!("Error reading {}: {}", target.display(), e),
+            output: format!("Error reading {}: {}", target.display(), message),
             is_error: true,
         },
     }
 }
 
-fn execute_write(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
+fn execute_write(call: &ToolCall, project_root: &Path) -> ToolResult {
     let path = call
         .arguments
         .get("path")
@@ -323,50 +505,23 @@ fn execute_write(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Too
         .get("content")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
+    // Revalidate the write target at execution time.
     let target = resolve_path(path, project_root);
-
-    // Check sandbox
-    let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !verdict_allows(&verdict) {
-        return ToolResult {
+    match crate::core::file_write(&target, content) {
+        Ok(()) => ToolResult {
             tool_name: "write".to_string(),
-            output: format!(
-                "Blocked by sandbox: {} ({})",
-                target.display(),
-                verdict.reason
-            ),
-            is_error: true,
-        };
-    }
-
-    if let Some(parent) = target.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return ToolResult {
-                tool_name: "write".to_string(),
-                output: format!("Error creating directory {}: {}", parent.display(), e),
-                is_error: true,
-            };
-        }
-    }
-
-    match std::fs::write(&target, content) {
-        Ok(()) => {
-            let size = content.len();
-            ToolResult {
-                tool_name: "write".to_string(),
-                output: format!("Written {} bytes to {}", size, target.display()),
-                is_error: false,
-            }
-        }
-        Err(e) => ToolResult {
+            output: format!("Written {} bytes to {}", content.len(), target.display()),
+            is_error: false,
+        },
+        Err(message) => ToolResult {
             tool_name: "write".to_string(),
-            output: format!("Error writing {}: {}", target.display(), e),
+            output: format!("Error writing {}: {}", target.display(), message),
             is_error: true,
         },
     }
 }
 
-fn execute_edit(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
+fn execute_edit(call: &ToolCall, project_root: &Path) -> ToolResult {
     let path = call
         .arguments
         .get("path")
@@ -383,47 +538,9 @@ fn execute_edit(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let target = resolve_path(path, project_root);
-
-    // Check sandbox
-    let verdict = sandbox.evaluate(crate::permissions::Operation::WriteFile, Some(&target));
-    if !verdict_allows(&verdict) {
-        return ToolResult {
-            tool_name: "edit".to_string(),
-            output: format!(
-                "Blocked by sandbox: {} ({})",
-                target.display(),
-                verdict.reason
-            ),
-            is_error: true,
-        };
-    }
-
-    let content = match std::fs::read_to_string(&target) {
-        Ok(c) => c,
-        Err(e) => {
-            return ToolResult {
-                tool_name: "edit".to_string(),
-                output: format!("Error reading {}: {}", target.display(), e),
-                is_error: true,
-            };
-        }
-    };
-
-    if !content.contains(old_string) {
-        return ToolResult {
-            tool_name: "edit".to_string(),
-            output: format!(
-                "Error: could not find the exact text to replace in {}. The old_string must match exactly.",
-                target.display()
-            ),
-            is_error: true,
-        };
-    }
-
-    let new_content = content.replace(old_string, new_string);
-    match std::fs::write(&target, &new_content) {
+    match crate::core::file_edit(&target, old_string, new_string) {
         Ok(()) => {
-            let changes = content.len() as isize - new_content.len() as isize;
+            let changes = old_string.len() as isize - new_string.len() as isize;
             let change_desc = if changes >= 0 {
                 format!("removed {} bytes", changes)
             } else {
@@ -435,139 +552,74 @@ fn execute_edit(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> Tool
                 is_error: false,
             }
         }
-        Err(e) => ToolResult {
+        Err(message) => ToolResult {
             tool_name: "edit".to_string(),
-            output: format!("Error writing {}: {}", target.display(), e),
+            output: format!("Error editing {}: {}", target.display(), message),
             is_error: true,
         },
     }
 }
 
-fn execute_bash(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {
-    let command_str = call
-        .arguments
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-
-    if command_str.trim().is_empty() {
-        return ToolResult {
-            tool_name: "bash".to_string(),
-            output: "Error: empty command".to_string(),
-            is_error: true,
-        };
-    }
-
-    // Check sandbox for shell operations
-    let verdict = sandbox.evaluate(crate::permissions::Operation::Shell, None);
-    if !verdict_allows(&verdict) {
-        return ToolResult {
-            tool_name: "bash".to_string(),
-            output: format!("Blocked by sandbox: {}", verdict.reason),
-            is_error: true,
-        };
-    }
-
-    // Spawn the command as a child so we can enforce a timeout and kill it if
-    // it runs too long. This prevents a hanging command from freezing the CLI.
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command_str)
-        .current_dir(project_root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return ToolResult {
-                tool_name: "bash".to_string(),
-                output: format!("Error running command: {}", e),
-                is_error: true,
-            }
-        }
-    };
-
-    let timeout = Duration::from_secs(SHELL_TIMEOUT_SECS);
-    let wait_result = child.wait_timeout(timeout);
-    match wait_result {
-        Ok(Some(status)) => {
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-            let stdout_str = stdout
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-            let stderr_str = stderr
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-            if status.success() {
-                let mut result = String::new();
-                if !stdout_str.trim().is_empty() {
-                    result.push_str(&stdout_str);
-                }
-                if !stderr_str.trim().is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&format!("(stderr) {}", stderr_str.trim()));
-                }
-                if result.trim().is_empty() {
-                    result = "Command completed successfully (no output)".to_string();
-                }
-                ToolResult {
-                    tool_name: "bash".to_string(),
-                    output: result.trim().to_string(),
-                    is_error: false,
-                }
+fn execute_bash(call: &ToolCall, project_root: &Path) -> ToolResult {
+    let command = call.arguments["command"].as_str().unwrap_or_default();
+    // Ctrl+C cancels the running child through the host-owned flag.
+    let cancel = &crate::interactive::CANCEL;
+    // Optional positive timeout_secs bounded by the C-core maximum.
+    let result = crate::core::command_run(
+        command,
+        project_root,
+        tool_timeout_from_args(&call.arguments),
+        cancel,
+    );
+    match result {
+        Ok(outcome) => {
+            let (label, success) = if outcome.timed_out {
+                ("Command timed out and was terminated".to_string(), false)
+            } else if outcome.exit_code < 0 {
+                ("Command interrupted; process terminated".to_string(), false)
             } else {
-                let mut result = String::new();
-                if !stdout_str.trim().is_empty() {
-                    result.push_str(&stdout_str);
-                }
-                if !stderr_str.trim().is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&stderr_str);
-                }
-                ToolResult {
-                    tool_name: "bash".to_string(),
-                    output: format!(
-                        "Command exited with code {}:\n{}",
-                        status.code().unwrap_or(-1),
-                        result.trim()
-                    ),
-                    is_error: true,
-                }
+                (
+                    format!("Exit code: {}", outcome.exit_code),
+                    outcome.exit_code == 0,
+                )
+            };
+            let mut output = String::new();
+            if !outcome.stdout.trim().is_empty() {
+                output.push_str(&outcome.stdout);
             }
-        }
-        Ok(None) => {
-            // Timed out: kill the child and report the timeout.
-            let _ = child.kill();
-            let _ = child.wait();
+            if !outcome.stderr.trim().is_empty() {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&format!("(stderr) {}", outcome.stderr.trim()));
+            }
+            if output.trim().is_empty() {
+                output = "Command completed (no output)".to_string();
+            }
             ToolResult {
-                tool_name: "bash".to_string(),
-                output: format!(
-                    "Command timed out after {}s and was killed",
-                    SHELL_TIMEOUT_SECS
-                ),
-                is_error: true,
+                tool_name: call.name.clone(),
+                output: format!("{label}\n{output}"),
+                is_error: !success,
             }
         }
-        Err(e) => ToolResult {
-            tool_name: "bash".to_string(),
-            output: format!("Error running command: {}", e),
-            is_error: true,
-        },
+        Err(message) => tool_error(call, format!("Command failed: {message}")),
     }
+}
+
+/// Optional positive `timeout_secs` from the tool arguments, bounded by the
+/// C-core maximum. Zero, negative, or missing values keep the default.
+fn tool_timeout_from_args(arguments: &serde_json::Value) -> Duration {
+    let default = crate::core::tool_timeout();
+    let Some(raw) = arguments
+        .get("timeout_secs")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return default;
+    };
+    if raw == 0 {
+        return default;
+    }
+    Duration::from_secs(raw.min(crate::core::tool_timeout_max().as_secs()))
 }
 
 fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
@@ -579,15 +631,17 @@ fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
 
     let full_pattern = project_root.join(pattern);
     let pattern_str = full_pattern.to_string_lossy().to_string();
+    let limit = crate::core::glob_result_limit() as usize;
 
     match glob::glob(&pattern_str) {
         Ok(entries) => {
-            let paths: Vec<String> = entries
+            // Take limit+1 entries so hitting limit+1 signals truncation.
+            let mut paths: Vec<String> = entries
                 .filter_map(|entry| entry.ok())
                 .filter(|p| {
-                    // Exclude secret-named files from glob results.
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    !secret_excludes().contains(&name)
+                    // Exclude secret-named files with the same case-insensitive
+                    // rule as reads and grep.
+                    !crate::blocklist::is_secret_file(p.as_path())
                 })
                 .map(|p| {
                     p.strip_prefix(project_root)
@@ -595,7 +649,10 @@ fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
                         .to_string_lossy()
                         .to_string()
                 })
+                .take(limit + 1)
                 .collect();
+            let truncated = paths.len() > limit;
+            paths.truncate(limit);
 
             if paths.is_empty() {
                 ToolResult {
@@ -604,13 +661,23 @@ fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
                     is_error: false,
                 }
             } else {
+                let notice = if truncated {
+                    format!(
+                        "\n[Result limited to {} paths; use a more specific pattern.]",
+                        limit
+                    )
+                } else {
+                    String::new()
+                };
                 ToolResult {
                     tool_name: "glob".to_string(),
                     output: format!(
-                        "Found {} file(s) matching '{}':\n{}",
+                        "Found {} file(s) (up to {}) matching '{}':\n{}{}",
                         paths.len(),
+                        limit,
                         pattern,
-                        paths.join("\n")
+                        paths.join("\n"),
+                        notice
                     ),
                     is_error: false,
                 }
@@ -624,6 +691,13 @@ fn execute_glob(call: &ToolCall, project_root: &Path) -> ToolResult {
     }
 }
 
+fn secret_excludes() -> &'static [&'static str] {
+    crate::blocklist::secret_file_names()
+}
+
+/// Bounded grep through the C core's command runner: output is capped so
+/// the pipe cannot fill, and exit code 1 (no matches) is distinct from real
+/// execution errors. Timeout and cancellation terminate the child.
 fn execute_grep(call: &ToolCall, project_root: &Path) -> ToolResult {
     let pattern = call
         .arguments
@@ -635,66 +709,81 @@ fn execute_grep(call: &ToolCall, project_root: &Path) -> ToolResult {
         .get("path")
         .and_then(serde_json::Value::as_str);
 
-    let mut cmd = Command::new("grep");
-    cmd.arg("-rn")
-        .arg("--with-filename")
-        .arg("-E")
-        .arg(pattern)
-        .current_dir(project_root);
-
-    // Exclude secret-named files so the model cannot read credentials through
-    // grep results.
+    let shell_quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let mut cmdline = String::from("grep -rn --with-filename -E");
     for exclude in secret_excludes() {
-        cmd.arg("--exclude").arg(exclude);
+        cmdline.push_str(&format!(" --exclude {}", shell_quote(exclude)));
     }
-    // Bound the search to avoid scanning enormous trees.
-    cmd.arg("--exclude-dir").arg(".git");
-    cmd.arg("--exclude-dir").arg("node_modules");
-    cmd.arg("--exclude-dir").arg("target");
-
+    cmdline.push_str(" --exclude-dir .git --exclude-dir node_modules --exclude-dir target");
     if let Some(filter) = path_filter {
-        cmd.arg("--include").arg(filter);
+        cmdline.push_str(&format!(" --include {}", shell_quote(filter)));
     }
+    cmdline.push_str(&format!(" -e {} .", shell_quote(pattern)));
 
-    cmd.arg(".");
-
-    let output = cmd.output();
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let lines: Vec<&str> = stdout.lines().collect();
+    let cancel = &crate::interactive::CANCEL;
+    let result =
+        crate::core::command_run(&cmdline, project_root, crate::core::tool_timeout(), cancel);
+    match result {
+        Ok(outcome) => match outcome.exit_code {
+            0 => {
+                // Keep only matches outside secret-named files: grep's
+                // --exclude is case-sensitive, so enforce the shared
+                // case-insensitive blocklist on the reported paths too.
+                let lines: Vec<&str> = outcome
+                    .stdout
+                    .lines()
+                    .filter(|line| {
+                        let path = line.split(':').next().unwrap_or("");
+                        !crate::blocklist::is_secret_file(std::path::Path::new(path))
+                    })
+                    .collect();
                 let total = lines.len();
-                let display: Vec<&str> = lines.iter().take(50).copied().collect();
-                let mut result = format!("Found {} match(es) for '{}':\n", total, pattern);
-                result.push_str(&display.join("\n"));
-                if total > 50 {
-                    result.push_str(&format!("\n... and {} more matches", total - 50));
+                let display_limit = crate::core::grep_line_limit() as usize;
+                let mut result = format!(
+                    "Found {} match(es) for '{}':\n{}",
+                    total,
+                    pattern,
+                    lines
+                        .iter()
+                        .take(display_limit)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                if total > display_limit {
+                    result.push_str(&format!("\n... and {} more matches", total - display_limit));
                 }
                 ToolResult {
                     tool_name: "grep".to_string(),
                     output: result,
                     is_error: false,
                 }
-            } else {
-                ToolResult {
-                    tool_name: "grep".to_string(),
-                    output: format!("No matches found for '{}'", pattern),
-                    is_error: false,
-                }
             }
-        }
-        Err(e) => ToolResult {
-            tool_name: "grep".to_string(),
-            output: format!("Error searching: {}", e),
-            is_error: true,
+            1 => ToolResult {
+                tool_name: "grep".to_string(),
+                output: format!("No matches found for '{}'", pattern),
+                is_error: false,
+            },
+            -1 => ToolResult {
+                tool_name: "grep".to_string(),
+                output: "Search interrupted or timed out; process terminated".to_string(),
+                is_error: true,
+            },
+            _ => ToolResult {
+                tool_name: "grep".to_string(),
+                output: format!(
+                    "Error searching: {}",
+                    if outcome.stderr.trim().is_empty() {
+                        format!("grep exited with code {}", outcome.exit_code)
+                    } else {
+                        outcome.stderr.trim().to_string()
+                    }
+                ),
+                is_error: true,
+            },
         },
+        Err(message) => tool_error(call, format!("Error searching: {message}")),
     }
-}
-
-/// File names that are excluded from grep/glob results to avoid leaking secrets.
-fn secret_excludes() -> &'static [&'static str] {
-    crate::blocklist::secret_file_names()
 }
 
 /// Resolve a path relative to the project root.
@@ -707,8 +796,9 @@ fn resolve_path(path: &str, project_root: &Path) -> PathBuf {
     }
 }
 
-/// Run the tool-use loop: send the prompt, process tool calls, return the final
-/// response text.
+/// Run the tool-use loop: send the prompt, process tool calls, and return
+/// the final response text. Tool requests and results are reported to the
+/// host for persistence so the next turn keeps execution history.
 pub async fn run_tool_loop(
     prompt: &str,
     sandbox: &Sandbox,
@@ -716,12 +806,14 @@ pub async fn run_tool_loop(
     endpoint: &crate::config::EndpointConfig,
     model: &str,
     prompt_context: ToolLoopPromptContext,
+    host: &mut dyn ToolHost,
 ) -> Result<String> {
     let adapter = crate::providers::adapter_for(endpoint.provider.clone());
+    let goal_state = prompt_context.goal.clone();
 
     let mut messages = vec![crate::providers::ChatMessage {
         role: "system".to_string(),
-        content: tool_use_system_instruction(prompt_context.effort),
+        content: tool_use_system_instruction(prompt_context.effort, goal_state.as_ref()),
     }];
     // Inject the active skill's prompt as a system message if set.
     if let Some(skill) = prompt_context.skill_prompt {
@@ -737,17 +829,38 @@ pub async fn run_tool_loop(
         content: prompt.to_string(),
     });
 
-    for iteration in 0..MAX_TOOL_ITERATIONS {
-        let request = crate::providers::ChatRequest {
+    let max_iterations = crate::core::tool_iteration_limit() as usize;
+    let mut correction_attempts = 0u32;
+
+    for iteration in 0..max_iterations {
+        if crate::core::agent_next(
+            crate::core::GOAL_NONE,
+            iteration as u32,
+            max_iterations as u32,
+            crate::interactive::was_interrupted(),
+            host.stopped(),
+            0,
+        ) != crate::core::AgentAction::Request
+        {
+            return Ok("Execution paused; session checkpoint retained.".into());
+        }
+        let mut request = crate::providers::ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
             max_tokens: Some(4096),
+            session_id: prompt_context.session_id.clone(),
         };
 
+        host.prepare_request(endpoint, &mut request).await?;
+        messages = request.messages.clone();
+        if !host.before_request()? {
+            return Ok("Execution paused; session checkpoint retained.".into());
+        }
+        crate::providers::validate_chat_request(&request)?;
         let mut response = String::new();
         let preview_buf = crate::ui::preview_start();
 
-        crate::providers::stream_chat_with_retry(
+        let streamed = crate::providers::stream_chat_with_retry(
             adapter.as_ref(),
             endpoint,
             request,
@@ -759,9 +872,15 @@ pub async fn run_tool_loop(
                 crate::ui::preview_update(&preview_buf, &delta);
             },
         )
-        .await?;
+        .await;
 
         crate::ui::preview_stop();
+        if let Err(error) = streamed {
+            if !response.is_empty() {
+                host.record_transcript("assistant", &response)?;
+            }
+            return Err(error);
+        }
 
         // Check if interrupted
         if crate::interactive::was_interrupted() {
@@ -769,69 +888,111 @@ pub async fn run_tool_loop(
             return Ok(response);
         }
 
-        let tool_calls = parse_tool_calls(&response);
+        let tool_calls = match parse_tool_calls(&response) {
+            Ok(calls) => calls,
+            Err(parse_error) => {
+                if correction_attempts >= 2 {
+                    return Err(anyhow!(
+                        "the model produced malformed tool calls three times: {parse_error}"
+                    ));
+                }
+                correction_attempts += 1;
+                host.record_transcript("assistant", &response)?;
+                host.record_transcript(
+                    "tool_result",
+                    &format!(
+                        "Tool protocol error: {parse_error}. Return one valid complete tool block."
+                    ),
+                )?;
+                messages.push(crate::providers::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                messages.push(crate::providers::ChatMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "Tool protocol error: {parse_error}. Fix the call and repeat it as one complete, valid <tool>{{...}}</tool> block."
+                    ),
+                });
+                continue;
+            }
+        };
         if tool_calls.is_empty() {
             // No more tool calls; this is the final response
             return Ok(response);
         }
+        correction_attempts = 0;
 
         // Add the assistant's response (with tool calls) to the conversation
+        // and the persistent transcript.
         messages.push(crate::providers::ChatMessage {
             role: "assistant".to_string(),
             content: response.clone(),
         });
+        host.record_transcript("assistant", &response)?;
 
-        // Execute each tool call and add results
+        // Execute each tool call and add results. Do not execute subsequent
+        // calls after cancellation, and never misrepresent denied work.
         for call in &tool_calls {
+            if crate::interactive::was_interrupted() {
+                eprintln!("\n{}", "(interrupted)".dimmed());
+                return Ok(response);
+            }
+            if call.name == "goal_update" {
+                // 8. Goal updates are validated by the host, never executed
+                // as a side effect.
+                let result_text = match host.goal_update(&call.arguments) {
+                    Ok(message) => message,
+                    Err(message) => format!("Error: {message}"),
+                };
+                crate::ui::print_tool_done("updating goal", false);
+                messages.push(crate::providers::ChatMessage {
+                    role: "user".to_string(),
+                    content: format!("Tool result for '{}':\n{}", call.name, result_text),
+                });
+                host.record_transcript(
+                    "tool_result",
+                    &format!("Tool result for 'goal_update':\n{result_text}"),
+                )?;
+                if host.stopped() {
+                    return Ok(result_text);
+                }
+                continue;
+            }
             let progress = tool_call_progress(&call.name, &call.arguments);
             crate::ui::print_tool_progress(&progress);
-            let result = execute_tool(call, sandbox, project_root);
+            let result = if let Some(result) =
+                authorize_tool(call, sandbox, project_root, host.dry_run(), &mut |action| {
+                    host.approve(action)
+                }) {
+                result
+            } else {
+                let call = call.clone();
+                let sandbox = sandbox.clone();
+                let root = project_root.to_path_buf();
+                tokio::task::spawn_blocking(move || execute_authorized(&call, &sandbox, &root))
+                    .await?
+            };
             let result_text = if result.is_error {
                 format!("Error: {}", result.output)
             } else {
-                result.output
+                result.output.clone()
             };
             crate::ui::print_tool_done(&progress, result.is_error);
             messages.push(crate::providers::ChatMessage {
                 role: "user".to_string(),
                 content: format!("Tool result for '{}':\n{}", call.name, result_text),
             });
-        }
-
-        if iteration == MAX_TOOL_ITERATIONS - 1 {
-            messages.push(crate::providers::ChatMessage {
-                role: "user".to_string(),
-                content: "You have reached the maximum number of tool calls. Please provide your final response now.".to_string(),
-            });
+            host.record_transcript(
+                "tool_result",
+                &format!("Tool result for '{}':\n{}", call.name, result_text),
+            )?;
+            if host.stopped() {
+                return Ok(result_text);
+            }
         }
     }
-
-    // Final call to get the response
-    let request = crate::providers::ChatRequest {
-        model: model.to_string(),
-        messages,
-        max_tokens: Some(4096),
-    };
-
-    let mut response = String::new();
-    let preview_buf = crate::ui::preview_start();
-
-    crate::providers::stream_chat_with_retry(adapter.as_ref(), endpoint, request, &mut |delta| {
-        if crate::interactive::was_interrupted() {
-            return;
-        }
-        response.push_str(&delta);
-        crate::ui::preview_update(&preview_buf, &delta);
-    })
-    .await?;
-
-    crate::ui::preview_stop();
-
-    if crate::interactive::was_interrupted() {
-        eprintln!("\n{}", "(interrupted)".dimmed());
-    }
-
-    Ok(response)
+    Ok("Execution paused: 25 provider turns used. Continue with another prompt.".into())
 }
 
 /// Build a human-readable progress label for a tool call.
@@ -882,7 +1043,8 @@ mod tests {
     #[test]
     fn parses_flat_tool_arguments() {
         let calls =
-            parse_tool_calls(r#"<tool>{"name":"bash","command":"python3 script.py"}</tool>"#);
+            parse_tool_calls(r#"<tool>{"name":"bash","command":"python3 script.py"}</tool>"#)
+                .unwrap();
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "bash");
@@ -895,7 +1057,8 @@ mod tests {
     #[test]
     fn parses_nested_tool_arguments() {
         let calls =
-            parse_tool_calls(r#"<tool>{"name":"read","arguments":{"path":"src/main.rs"}}</tool>"#);
+            parse_tool_calls(r#"<tool>{"name":"read","arguments":{"path":"src/main.rs"}}</tool>"#)
+                .unwrap();
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read");
@@ -903,5 +1066,50 @@ mod tests {
             calls[0].arguments.get("path").and_then(|v| v.as_str()),
             Some("src/main.rs")
         );
+    }
+
+    #[test]
+    fn malformed_tool_blocks_are_errors_not_silent_success() {
+        let unclosed = parse_tool_calls(r#"Sure! <tool>{"name":"read","arguments":{"path":"x"}}"#);
+        assert!(unclosed.is_err());
+
+        let bad_json = parse_tool_calls("<tool>{\"name\": read}</tool>");
+        assert!(bad_json.is_err());
+
+        let no_name = parse_tool_calls("<tool>{\"arguments\":{\"path\":\"x\"}}</tool>");
+        assert!(no_name.is_err());
+
+        // No tool blocks at all is fine (final response).
+        assert!(parse_tool_calls("All done.").unwrap().is_empty());
+    }
+
+    #[test]
+    fn glob_excludes_secret_files_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".env"), "x=1").unwrap();
+        std::fs::write(temp.path().join("SECRETS.YAML"), "x").unwrap();
+        std::fs::write(temp.path().join("keep.txt"), "x").unwrap();
+        let call = ToolCall {
+            name: "glob".into(),
+            arguments: serde_json::json!({"pattern": "*"}),
+        };
+        let result = execute_glob(&call, temp.path());
+        assert!(result.output.contains("keep.txt"), "{}", result.output);
+        assert!(!result.output.contains(".env"));
+        assert!(!result.output.contains("SECRETS.YAML"));
+    }
+
+    #[test]
+    fn grep_hides_secret_files_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".ENV"), "TOKEN=leak").unwrap();
+        std::fs::write(temp.path().join("notes.md"), "TOKEN elsewhere").unwrap();
+        let call = ToolCall {
+            name: "grep".into(),
+            arguments: serde_json::json!({"pattern": "TOKEN"}),
+        };
+        let result = execute_grep(&call, temp.path());
+        assert!(result.output.contains("notes.md"), "{}", result.output);
+        assert!(!result.output.contains(".ENV"), "{}", result.output);
     }
 }

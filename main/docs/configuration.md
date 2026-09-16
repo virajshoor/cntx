@@ -78,7 +78,9 @@ ui:
 `default_model` is the persistent default selected with `cntx model default`. It is
 used when no `--model` override applies and routing does not select a model.
 
-`ui.mode` can be `auto`, `counsel`, `allow`, `request-permission`, or `file-only`.
+`ui.mode` can be `auto-approve`, `counsel`, `all-approve`, `manual-approve`, or
+`file-only`. Legacy aliases `auto`, `allow`, and `request-permission` keep
+loading from existing configuration files.
 
 `ui.markdown` documents the default terminal behavior: assistant responses and
 interactive help are rendered as markdown, so `**bold**`, inline code, lists, and

@@ -11,22 +11,33 @@ use crate::permissions::Mode;
 use crate::permissions::Operation;
 use crate::sandbox::SandboxVerdict;
 
+/// Shift+Tab cycles the mode without submitting or discarding the current
+/// draft: the handler captures the draft from the line buffer, the loop
+/// cycles the mode, and the next readline starts pre-filled with the draft.
 struct ShiftTabHandler;
 
 impl ConditionalEventHandler for ShiftTabHandler {
-    fn handle(&self, _evt: &Event, _n: u16, _positive: bool, _ctx: &EventContext) -> Option<Cmd> {
+    fn handle(&self, _evt: &Event, _n: u16, _positive: bool, ctx: &EventContext) -> Option<Cmd> {
+        let draft = ctx.line().to_string();
+        *PENDING_DRAFT.lock().unwrap() = Some(draft);
         SHIFT_TAB_PRESSED.store(true, Ordering::SeqCst);
         Some(Cmd::AcceptLine)
     }
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 static SHIFT_TAB_PRESSED: AtomicBool = AtomicBool::new(false);
+static PENDING_DRAFT: Mutex<Option<String>> = Mutex::new(None);
 
 /// Set when Ctrl+C is pressed during generation. The streaming loop checks
 /// this and breaks out early, returning whatever text was generated so far.
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Host-owned cancellation flag for the C core's command runner. The C wait
+/// loop polls this int; non-zero terminates the child process group.
+pub static CANCEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// True when a prompt is currently running. Used to distinguish "interrupt"
 /// (first Ctrl+C while generating) from "quit" (Ctrl+C while idle).
@@ -42,6 +53,7 @@ pub fn set_prompt_running(running: bool) {
     PROMPT_RUNNING.store(running, Ordering::SeqCst);
     if running {
         INTERRUPTED.store(false, Ordering::SeqCst);
+        CANCEL.store(0, Ordering::SeqCst);
     }
 }
 
@@ -53,12 +65,19 @@ pub fn was_interrupted() -> bool {
 /// Spawn a background task that listens for Ctrl+C. When a prompt is running,
 /// the first Ctrl+C sets the interrupt flag. When idle, Ctrl+C is handled by
 /// rustyline (which returns an Interrupted error).
+pub async fn wait_for_interrupt() {
+    while !was_interrupted() {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 pub fn spawn_ctrl_c_handler() {
     tokio::spawn(async {
         loop {
             tokio::signal::ctrl_c().await.ok();
             if PROMPT_RUNNING.load(Ordering::SeqCst) {
                 INTERRUPTED.store(true, Ordering::SeqCst);
+                CANCEL.store(1, Ordering::SeqCst);
             }
             // If not running, rustyline's readline will get the SIGINT and
             // return an error, which our loop handles by quitting.
@@ -66,14 +85,23 @@ pub fn spawn_ctrl_c_handler() {
     });
 }
 
+/// Shift+Tab press result consumed by the readline loop: cycle the mode and
+/// restore the captured draft on the next prompt.
+fn take_shift_tab() -> Option<String> {
+    if SHIFT_TAB_PRESSED.swap(false, Ordering::SeqCst) {
+        let draft = PENDING_DRAFT.lock().unwrap().take().unwrap_or_default();
+        Some(draft)
+    } else {
+        None
+    }
+}
+
 pub async fn run(runtime: &mut Runtime) -> Result<()> {
-    // Spawn background Ctrl+C handler for interrupting generation.
-    spawn_ctrl_c_handler();
     // Configure the editor: emacs mode.
     let config = ConfigBuilder::new().edit_mode(EditMode::Emacs).build();
     let mut editor = DefaultEditor::with_config(config)?;
-    // Shift+Tab => accept the line immediately; the loop detects the flag
-    // and cycles the permission mode (like Claude Code).
+    // Shift+Tab => accept the line immediately; the loop detects the flag,
+    // cycles the permission mode, and restores the draft (like Claude Code).
     editor.bind_sequence(
         Event::from(KeyEvent(KeyCode::BackTab, Modifiers::NONE)),
         EventHandler::Conditional(Box::new(ShiftTabHandler)),
@@ -86,10 +114,20 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
     let _ = editor.load_history(&history_path);
     print_greeting(runtime);
     ui_line("Type `/help` for commands, `/status` for the current workspace, `/exit` to quit.");
-    ui_line("Press Shift+Tab to cycle permission modes.");
+    ui_line(
+        "Press Shift+Tab to cycle permission modes (auto-approve, all-approve, manual-approve).",
+    );
+
+    // A draft captured by Shift+Tab is restored here so the user can keep
+    // editing; pressing Shift+Tab alone starts with an empty draft.
+    let mut pending_draft: Option<String> = None;
 
     loop {
-        let line = match editor.readline(&prompt(runtime)) {
+        let readline_result = match pending_draft.take() {
+            Some(draft) => editor.readline_with_initial(&prompt(runtime), (&draft, "")),
+            None => editor.readline(&prompt(runtime)),
+        };
+        let line = match readline_result {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => {
                 // Ctrl+C while idle at the prompt: quit.
@@ -103,45 +141,45 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
             Err(e) => return Err(e.into()),
         };
 
-        // Check if Shift+Tab was pressed (the handler accepted the line).
-        if SHIFT_TAB_PRESSED.swap(false, Ordering::SeqCst) {
+        // Shift+Tab: cycle the mode; keep the draft for the next prompt.
+        if let Some(draft) = take_shift_tab() {
             cycle_mode(runtime);
+            pending_draft = Some(draft);
             continue;
         }
 
-        let input = line.trim();
+        let input = line.trim().to_string();
         if input.is_empty() {
             continue;
         }
-        let _ = editor.add_history_entry(input);
+        let _ = editor.add_history_entry(&input);
 
         if input.starts_with('/') {
-            if handle_slash(runtime, input).await? {
-                break;
+            match handle_slash(runtime, &input).await {
+                Ok(quit) => {
+                    if quit {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // Slash command errors leave the shell usable.
+                    println!("{} {error}", "error:".red());
+                }
             }
             continue;
         }
 
-        // Support message queueing: prompts separated by ` && ` are processed
-        // in sequence. Each is treated as a separate conversation turn.
-        let prompts: Vec<&str> = input.split(" && ").collect();
-        for queued in prompts {
-            let queued = queued.trim();
-            if queued.is_empty() {
-                continue;
+        // The entire input is one prompt; ordinary text containing shell
+        // syntax like ` && ` is never split into a queue.
+        match runtime.run_prompt(&input).await {
+            Ok(()) => {}
+            Err(error) => {
+                // Prompt failures keep the shell usable and the saved state.
+                println!("{} {error}", "error:".red());
             }
-            if queued.starts_with('/') {
-                if handle_slash(runtime, queued).await? {
-                    break;
-                }
-                continue;
-            }
-            runtime.run_prompt(queued).await?;
-            // If the prompt was interrupted, don't process the rest of the queue.
-            if was_interrupted() {
-                println!("{}", "(interrupted)".dimmed());
-                break;
-            }
+        }
+        if was_interrupted() {
+            println!("{}", "(interrupted)".dimmed());
         }
     }
 
@@ -150,17 +188,19 @@ pub async fn run(runtime: &mut Runtime) -> Result<()> {
     Ok(())
 }
 
-/// Cycle through permission modes: Auto -> Allow -> Counsel -> FileOnly -> Auto.
+/// Cycle through the canonical modes from the C core:
+/// auto-approve -> all-approve -> manual-approve -> auto-approve.
+/// Legacy extra modes (counsel, file-only) return to auto-approve.
 fn cycle_mode(runtime: &mut Runtime) {
-    runtime.mode = match runtime.mode {
-        Mode::Auto => Mode::Allow,
-        Mode::Allow => Mode::Counsel,
-        Mode::Counsel => Mode::FileOnly,
-        Mode::FileOnly => Mode::RequestPermission,
-        Mode::RequestPermission => Mode::Auto,
-    };
+    runtime.mode = runtime.mode.next();
+    // Update runtime and sandbox policy together so displayed state and
+    // enforced policy never disagree.
     runtime.sandbox.set_mode(runtime.mode);
-    println!("mode: {:?} - {}", runtime.mode, runtime.mode.description());
+    println!(
+        "mode: {} - {}",
+        runtime.mode.as_str(),
+        runtime.mode.description()
+    );
 }
 
 fn prompt(runtime: &Runtime) -> String {
@@ -170,13 +210,7 @@ fn prompt(runtime: &Runtime) -> String {
         .as_deref()
         .or(runtime.config.default_model.as_deref())
         .unwrap_or("auto");
-    let mode = match runtime.mode {
-        crate::permissions::Mode::Auto => "auto",
-        crate::permissions::Mode::Counsel => "counsel",
-        crate::permissions::Mode::Allow => "allow",
-        crate::permissions::Mode::RequestPermission => "ask",
-        crate::permissions::Mode::FileOnly => "files",
-    };
+    let mode = runtime.mode.as_str();
     let apply = if runtime.apply { "+apply" } else { "" };
     let dry_run = if runtime.dry_run { "+dry-run" } else { "" };
     let safety = if runtime.sandbox.enabled() {
@@ -219,14 +253,20 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
                 "**Commands**\n\n\
 - `/help` - show this help\n\
 - `/status` - show endpoint, model, mode, sandbox, and apply state\n\
-- `/mode` - show the active permission mode\n\
-- `/model <model>` - switch the model for this session (e.g. `/model gpt-4o`)\n\
-- `/model` - show the current model\n\
+- `/mode` - show the current approval mode\n\
+- `/mode <name>` - switch modes for this session: auto-approve, all-approve, manual-approve, counsel, file-only\n\
+- `/model` - show the effective endpoint and model\n\
+- `/model <id-or-alias>` - switch the model for this session (`/model auto` restores automatic selection)\n\
+- `/models` - list cached models grouped by endpoint\n\
 - `/effort [low|medium|high]` - show or set investigation and verification depth\n\
-- `/clear` - start a fresh conversation session\n\
-- `/compact` - summarize the conversation so far and start a fresh context\n\
+- `/goal` - show goal status\n\
+- `/goal <objective>` - start a goal-oriented run\n\
+- `/goal resume|pause|cancel` - control the active goal\n\
+- `/goal new <objective>` - start a goal whose text begins with a reserved word\n\
+- `/resume [session-id]` - resume the latest or given session in this workspace\n\
+- `/clear` - save the old session and start a fresh one\n\
+- `/compact` - summarize the conversation so far; the session id stays the same\n\
 - `/cost` - show estimated token usage and cost for this session\n\
-- `/models` - list cached models and aliases\n\
 - `/endpoints` - list endpoints\n\
 - `/skills` - list skills\n\
 - `/skill <name>` - activate a skill so its prompt is injected into each request\n\
@@ -236,7 +276,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/api-keys` - list stored API keys, masked\n\
 - `/default <model-or-alias>` - set the persistent default model\n\
 - `/apply` - toggle apply mode and write `path=` fenced blocks through the sandbox\n\
-- `/dry-run` - toggle apply previews without file writes\n\
+- `/dry-run` - toggle dry-run: no file writes or shell execution\n\
 - `/checklist` - show the files from the last apply run\n\
 - `/theme` - toggle between dark and light mode\n\
 - `/exit` - quit\n",
@@ -248,7 +288,30 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             Ok(false)
         }
         Some("/mode") => {
-            println!("mode: {:?} - {}", runtime.mode, runtime.mode.description());
+            if let Some(name) = parts.get(1).copied() {
+                // Validate first: invalid input changes nothing.
+                match Mode::parse(name) {
+                    Some(mode) => {
+                        runtime.mode = mode;
+                        runtime.sandbox.set_mode(mode);
+                        println!(
+                            "mode: {} - {}",
+                            runtime.mode.as_str(),
+                            runtime.mode.description()
+                        );
+                    }
+                    None => println!(
+                        "invalid mode '{name}'; use auto-approve, all-approve, manual-approve, counsel, or file-only"
+                    ),
+                }
+            } else {
+                println!(
+                    "mode: {} - {}",
+                    runtime.mode.as_str(),
+                    runtime.mode.description()
+                );
+                println!("modes: auto-approve, all-approve, manual-approve, counsel, file-only");
+            }
             Ok(false)
         }
         Some("/effort") => {
@@ -271,66 +334,103 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             }
             Ok(false)
         }
+        Some("/goal") => {
+            let rest = input
+                .split_once("/goal")
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or("");
+            if rest.is_empty() {
+                println!("{}", runtime.goal_status_text());
+                return Ok(false);
+            }
+            if rest == "pause" {
+                let message = runtime.pause_goal()?;
+                println!("{message}");
+                return Ok(false);
+            }
+            if rest == "cancel" {
+                let message = runtime.cancel_goal()?;
+                println!("{message}");
+                return Ok(false);
+            }
+            if rest == "resume" {
+                let message = runtime.resume_goal().await?;
+                println!("{message}");
+                return Ok(false);
+            }
+            let objective = if let Some(new_rest) = rest.strip_prefix("new ") {
+                // Explicit form for objectives that begin with reserved words.
+                new_rest.trim().to_string()
+            } else {
+                rest.to_string()
+            };
+            let message = runtime.start_goal(&objective).await?;
+            println!("{message}");
+            Ok(false)
+        }
+        Some("/resume") => {
+            let session_id = parts.get(1).copied();
+            let store = crate::sessions::SessionStore::new(&runtime.store);
+            let loaded = match session_id {
+                Some(id) => store.load(id)?,
+                None => {
+                    // Latest for the current workspace: sessions from other
+                    // directories are never silently resumed here. Legacy
+                    // sessions without a root are treated as this
+                    // workspace's with a visible notice below.
+                    let current = runtime.sandbox.project_root().to_path_buf();
+                    store
+                        .list()?
+                        .into_iter()
+                        .find(|session| {
+                            session.workspace_root.as_deref() == Some(current.as_path())
+                                || session.workspace_root.is_none()
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("no saved sessions in this workspace yet"))?
+                }
+            };
+            // Never silently switch workspace roots.
+            let current = runtime.sandbox.project_root().to_path_buf();
+            if let Some(session_root) = loaded.workspace_root.as_ref() {
+                if session_root != &current {
+                    println!(
+                        "{}",
+                        format!(
+                            "session {} belongs to {}; launch cntx in that directory to resume it",
+                            loaded.id,
+                            session_root.display()
+                        )
+                        .yellow()
+                    );
+                    return Ok(false);
+                }
+            } else {
+                println!(
+                    "{}",
+                    "note: this session predates workspace tracking; resuming in the current workspace".yellow()
+                );
+            }
+            println!("resumed session {}", loaded.id);
+            runtime.session = loaded;
+            if runtime.session.goal.is_some() {
+                println!("{}", runtime.goal_status_text());
+            }
+            Ok(false)
+        }
         Some("/clear") => {
-            runtime.session = crate::sessions::Session::new("interactive");
+            // Save the old session, then start fresh. Selected endpoint,
+            // model, mode, and effort are kept.
+            runtime.save_session()?;
+            let mut fresh = crate::sessions::Session::new("interactive");
+            fresh.workspace_root = Some(runtime.sandbox.project_root().to_path_buf());
+            runtime.session = fresh;
             runtime.last_apply_outcomes.clear();
             println!("started a fresh session: {}", runtime.session.id);
             Ok(false)
         }
         Some("/compact") => {
-            let msg_count = runtime.session.messages.len();
-            if msg_count <= 4 {
-                println!("nothing to compact; only {msg_count} messages in this session");
-                return Ok(false);
-            }
-            // Keep the last 2 turns (4 messages) and summarize the rest.
-            let to_summarize: Vec<_> = runtime.session.messages[..msg_count - 4]
-                .iter()
-                .map(|m| {
-                    format!(
-                        "{}: {}",
-                        m.role,
-                        m.content.chars().take(500).collect::<String>()
-                    )
-                })
-                .collect();
-            let summary_prompt = format!(
-                "Summarize the following conversation in 3-5 bullet points. Keep key decisions, file names, and context:\n\n{}",
-                to_summarize.join("\n\n")
-            );
-            // Do a quick model call to summarize.
-            let endpoint_name = runtime.config.primary_endpoint.clone().unwrap_or_default();
-            let endpoint = runtime.config.endpoints.get(&endpoint_name).cloned();
-            if let Some(endpoint) = endpoint {
-                let model = runtime
-                    .model_override
-                    .clone()
-                    .or_else(|| runtime.config.default_model.clone())
-                    .unwrap_or_else(|| endpoint.default_model.clone().unwrap_or_default());
-                let request = crate::providers::ChatRequest {
-                    model,
-                    messages: vec![crate::providers::ChatMessage {
-                        role: "user".to_string(),
-                        content: summary_prompt,
-                    }],
-                    max_tokens: Some(512),
-                };
-                println!("compacting {} messages...", msg_count - 4);
-                let summary = runtime.generate(&endpoint, request).await?;
-                let last_messages = runtime.session.messages[msg_count - 4..].to_vec();
-                runtime.session = crate::sessions::Session::new("interactive");
-                runtime.session.push(
-                    "system",
-                    format!("Previous conversation summary:\n{summary}"),
-                );
-                for msg in last_messages {
-                    runtime.session.push(&msg.role, &msg.content);
-                }
-                crate::sessions::SessionStore::new(&runtime.store).save(&runtime.session)?;
-                println!("compacted to {} messages", runtime.session.messages.len());
-            } else {
-                println!("no endpoint configured; cannot compact");
-            }
+            let message = runtime.compact_session().await?;
+            println!("{message}");
             Ok(false)
         }
         Some("/cost") => {
@@ -409,15 +509,79 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
         }
         Some("/model") => {
             if let Some(value) = parts.get(1).copied() {
-                runtime.model_override = Some(value.to_string());
-                println!("model set to {value} for this session");
+                if value == "auto" {
+                    runtime.model_override = None;
+                    println!("model: automatic selection (config default or routing)");
+                    return Ok(false);
+                }
+                // An endpoint-bound alias selects its endpoint too. Only an
+                // explicit CLI endpoint override conflicts; the configured
+                // primary is not a conflict, the alias simply switches the
+                // session's endpoint.
+                if let Some(alias) = runtime.config.aliases.get(value) {
+                    if let Some(alias_endpoint) = alias.endpoint.as_ref() {
+                        if runtime.endpoint_override.is_some()
+                            && runtime.endpoint_override.as_deref() != Some(alias_endpoint.as_str())
+                        {
+                            println!(
+                                "{}",
+                                format!(
+                                    "alias '{value}' belongs to endpoint '{alias_endpoint}' but --endpoint {} was passed; restart without --endpoint or use /model auto",
+                                    runtime.endpoint_override.as_deref().unwrap_or_default()
+                                )
+                                .yellow()
+                            );
+                            return Ok(false);
+                        }
+                        if runtime.endpoint_override.is_none() {
+                            runtime.endpoint_override = Some(alias_endpoint.clone());
+                        }
+                    }
+                    runtime.model_override = Some(alias.model.clone());
+                    println!(
+                        "model set to {} for this session{}",
+                        alias.model,
+                        runtime
+                            .endpoint_override
+                            .as_deref()
+                            .map(|endpoint| format!(" on endpoint {endpoint}"))
+                            .unwrap_or_default()
+                    );
+                } else {
+                    runtime.model_override = Some(value.to_string());
+                    println!("model set to {value} for this session");
+                }
             } else {
-                let current = runtime
-                    .model_override
-                    .as_deref()
-                    .or(runtime.config.default_model.as_deref())
-                    .unwrap_or("auto");
-                println!("model: {current}");
+                // Show the effective endpoint/model resolved the same way a
+                // real request resolves it, not stale config values.
+                match runtime.model_override.as_deref() {
+                    Some(model) => {
+                        let resolved = runtime.resolve_endpoint().and_then(|(name, endpoint)| {
+                            runtime
+                                .resolve_model(&name, &endpoint, 0)
+                                .map(|model| (name, model))
+                        });
+                        match resolved {
+                            Ok((name, resolved)) => println!(
+                                "model: {resolved} on endpoint {name} (session override: {model})"
+                            ),
+                            Err(_) => println!("model: {model} (session override)"),
+                        }
+                    }
+                    None => {
+                        let resolved = runtime.resolve_endpoint().and_then(|(name, endpoint)| {
+                            runtime
+                                .resolve_model(&name, &endpoint, 0)
+                                .map(|model| (name, model))
+                        });
+                        match resolved {
+                            Ok((name, resolved)) => println!(
+                                "model: {resolved} on endpoint {name} (automatic selection)"
+                            ),
+                            Err(_) => println!("model: auto (automatic selection: routing)"),
+                        }
+                    }
+                }
             }
             Ok(false)
         }
@@ -456,7 +620,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
                         .green()
                         .to_string()
                 } else {
-                    "off".dimmed().to_string()
+                    "off (chat-only)".dimmed().to_string()
                 }
             );
             Ok(false)
@@ -466,7 +630,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             println!(
                 "dry run: {}",
                 if runtime.dry_run {
-                    "on (apply previews are shown but files are not written)"
+                    "on (mutations and shell execution are blocked; changes are described only)"
                         .yellow()
                         .to_string()
                 } else {
@@ -511,10 +675,10 @@ fn print_status(runtime: &Runtime) {
         .or(runtime.config.default_model.as_deref())
         .unwrap_or("<auto>");
     println!(
-        "  endpoint: {}   model: {}   mode: {:?}   effort: {}",
+        "  endpoint: {}   model: {}   mode: {}   effort: {}",
         endpoint.green(),
         model.green(),
-        runtime.mode,
+        runtime.mode.as_str(),
         runtime.effort.as_str()
     );
     println!(
@@ -536,6 +700,9 @@ fn print_status(runtime: &Runtime) {
         },
         runtime.session.id
     );
+    if let Some(goal) = runtime.session.goal.as_ref() {
+        println!("  goal: {} ({})", goal.objective, goal.status);
+    }
 }
 
 fn ui_line(text: &str) {
@@ -552,7 +719,7 @@ fn print_sandbox(sandbox: &crate::sandbox::Sandbox) {
             "DISABLED (dangerous)"
         }
     );
-    println!("mode: {:?}", summary.mode);
+    println!("mode: {}", summary.mode.as_str());
     println!("project root: {}", summary.project_root.display());
     println!("writable roots:");
     for root in &summary.allow_write_roots {

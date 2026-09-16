@@ -37,6 +37,9 @@ Implemented systems:
 - auto routing by optimized prompt size
 - Counsel mode for token-efficient model collaboration
 - prompt optimization
+- C core (`csrc/`) owning permission decisions, tool validation, file tools,
+  bounded command execution, goal state transitions, context budgets, and
+  routing classification; Rust remains the transport/CLI adapter layer
 - memory-conscious context selection primitives
 - streaming response handling
 - interactive shell with markdown rendering, `/status`, slash commands, and a
@@ -47,7 +50,11 @@ Implemented systems:
 - apply mode that writes model-proposed `path=` fenced code blocks through the
   sandbox and prints a reusable checklist
 - built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
-- permission modes
+- permission modes: auto-approve (default), all-approve, manual-approve,
+  counsel, file-only, with legacy aliases preserved
+- persistent goals (`/goal`) with validated progress updates, step budgets,
+  stall detection, and pause/resume/cancel
+- OpenCode Go subscription provider with per-family protocol routing
 - docs and tests
 - packaged interactive docs browser via `cntx --docs`
 
@@ -62,6 +69,15 @@ Supported providers:
 - Ollama Cloud
 
 The provider system is adapter-based. A future provider should plug in by implementing the provider adapter behavior for listing models and streaming chat responses. For gateways that only need different base URLs, headers, or request paths, a [custom provider preset](docs/custom-providers.md) reuses an existing adapter without new code.
+
+## OpenCode Go
+
+[OpenCode Go](https://opencode.ai/docs/go/) is a $10/month subscription for
+open coding models. Cntx ships it as a built-in preset that resolves
+`OPENCODE_GO_API_KEY` or the runtime store, sends `User-Agent: cntx/<version>`
+and a stable `x-opencode-session` id on every Go request, and routes each model
+family to its documented API path (chat completions, Anthropic-compatible
+messages, or OpenAI Responses). See [OpenCode Go](docs/opencode-go.md).
 
 ## Ollama Cloud Pro Support
 
@@ -188,7 +204,9 @@ after `cargo install cntx` without needing source files beside the binary.
 
 ## Sessions
 
-Interactive sessions are stored in the config directory. Sessions can be listed, resumed, exported, or imported.
+Interactive sessions are stored in the config directory. Sessions can be
+listed, resumed, exported, or imported, and `cntx session resume` now enters
+the interactive loop instead of printing YAML.
 
 ```bash
 cntx session list
@@ -196,6 +214,13 @@ cntx session resume <id>
 cntx session export <id> session.json
 cntx session import session.json
 ```
+
+Sessions persist tool calls, tool results, and goal state atomically after each
+step. `/compact` keeps the session id and preserves summaries, decisions, and
+goals; the same mechanism compacts automatically when requests would exceed the
+context budget. Sessions belong to their workspace; resuming from another
+directory shows the session's path instead of switching roots silently. See
+[Goals](docs/goals.md) for the goal agent loop.
 
 ## Skills
 

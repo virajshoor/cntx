@@ -28,6 +28,9 @@ exclude = [
 name = "cntx"
 path = "src/main.rs"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -52,5 +55,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 wait-timeout = "0.2"
 
-[dev-dependencies]
 tempfile = "3"

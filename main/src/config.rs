@@ -148,6 +148,18 @@ impl EndpointConfig {
             .clone()
             .or_else(|| self.api_key_env.as_ref().and_then(|key| env::var(key).ok()))
     }
+
+    /// Preset identity preserved from the custom provider preset, used by
+    /// runtime key resolution.
+    pub fn preset_identity(&self) -> Option<&str> {
+        self.metadata.get("preset").and_then(Value::as_str)
+    }
+
+    /// Explicit protocol override for mixed-protocol presets. Set through
+    /// endpoint metadata (`protocol: chat|messages|responses`).
+    pub fn protocol_override(&self) -> Option<&str> {
+        self.metadata.get("protocol").and_then(Value::as_str)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -168,6 +180,8 @@ pub struct RoutingConfig {
     /// into each new prompt. 0 disables history. Defaults to 10.
     #[serde(default = "default_history_turns")]
     pub history_turns: usize,
+    #[serde(default = "crate::core::context_default_budget")]
+    pub input_token_budget: usize,
 }
 
 fn default_history_turns() -> usize {
@@ -181,6 +195,7 @@ impl Default for RoutingConfig {
             family_overrides: BTreeMap::new(),
             default_models: BTreeMap::new(),
             history_turns: 10,
+            input_token_budget: crate::core::context_default_budget(),
         }
     }
 }
@@ -395,7 +410,9 @@ impl CustomProvider {
         }
     }
 
-    /// Build an endpoint configuration from this preset.
+    /// Build an endpoint configuration from this preset. The preset name is
+    /// preserved in endpoint metadata so runtime key resolution can find a
+    /// key stored for the preset identity.
     pub fn to_endpoint(&self, endpoint_name: impl Into<String>) -> EndpointConfig {
         let provider = self.provider_kind();
         let mut endpoint = EndpointConfig::new(endpoint_name, provider);
@@ -409,6 +426,9 @@ impl CustomProvider {
             endpoint.default_model = Some(default_model.clone());
         }
         endpoint.custom_headers = self.headers.clone();
+        endpoint
+            .metadata
+            .insert("preset".to_string(), Value::from(self.name.clone()));
         if let Some(path) = self.models_path.as_ref() {
             endpoint
                 .metadata

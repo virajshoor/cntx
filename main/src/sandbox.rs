@@ -163,10 +163,18 @@ fn resolve_target(target: &Path) -> Option<PathBuf> {
     if let Some(canon) = canonicalize(target) {
         return Some(canon);
     }
-    // New file: resolve its parent and reattach the file name.
+    // Resolve missing ancestors too, without allowing unresolved traversal or
+    // dangling symlinks to bypass containment.
+    if std::fs::symlink_metadata(target).is_ok()
+        || target
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return None;
+    }
     let parent = target.parent()?;
     let file_name = target.file_name()?;
-    let canon_parent = canonicalize(parent)?;
+    let canon_parent = resolve_target(parent)?;
     Some(canon_parent.join(file_name))
 }
 

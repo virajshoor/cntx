@@ -25,6 +25,18 @@ Each endpoint stores:
 Prefer `api_key_env` over inline `api_key` on shared machines, or use the runtime
 key store with `cntx api-key add --provider <label>`. See [API keys](api-keys.md).
 
+## OpenCode Go subscription
+
+[OpenCode Go](https://opencode.ai/docs/go/) is available as a built-in preset;
+see [OpenCode Go](opencode-go.md) for the full setup and protocol details:
+
+```bash
+cntx api-key add --provider opencode-go
+cntx provider install-preset opencode-go
+cntx provider use opencode-go
+cntx --refresh-models
+```
+
 ## OpenAI
 
 ```bash

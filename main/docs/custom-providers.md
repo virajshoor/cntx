@@ -83,7 +83,7 @@ cntx endpoint --new --name gw --from-preset gateway --default-model gpt-4o-mini
 Then add a key and refresh models:
 
 ```bash
-cntx api-key add --provider openai --value sk-...   # if the gateway uses OpenAI auth
+cntx api-key add --provider <preset-name> --value sk-...   # key resolves per preset identity
 cntx endpoint --set-primary gw
 cntx --refresh-models
 ```

@@ -71,13 +71,20 @@ it exists for workflows where the assistant must edit across many roots.
 
 The sandbox works together with permission modes:
 
-- `auto` (default): reads allowed; writes inside the sandbox ask first; shell and
-  network ask first.
-- `counsel`: token-efficient model mix; permission behavior matches `auto`.
-- `allow`: writes inside the sandbox proceed without asking; shell and network
-  proceed without asking. Writes outside the sandbox are still denied.
-- `request-permission`: ask before any operation.
+- `auto-approve` (default): reads allowed; writes inside the sandbox ask first;
+  shell and network ask first.
+- `all-approve`: writes inside the sandbox proceed without asking; shell and
+  network proceed without asking. Writes outside the sandbox are still denied.
+- `manual-approve`: ask before any operation.
+- `counsel`: token-efficient model mix; permission behavior matches
+  `auto-approve`.
 - `file-only`: file reads and writes allowed (within the sandbox); shell and
   network denied.
+
+Legacy names `auto`, `allow`, and `request-permission` still work as aliases.
+
+The sandbox is an application policy layer, not OS isolation: an approved shell
+command can access the wider machine. Path containment covers direct file
+writes (including symlink and traversal escape attempts).
 
 See [Modes](modes.md) for the full mode reference.

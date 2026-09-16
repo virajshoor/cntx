@@ -11,7 +11,11 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: main
@@ -32,6 +36,14 @@ jobs:
             main/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('main/Cargo.lock') }}
 
+      - name: C self-test with sanitizers
+        run: |
+          clang -std=c17 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
+            -I csrc \
+            csrc/agent.c csrc/context.c csrc/permissions.c csrc/routing.c csrc/tools.c \
+            tests/c_selftest.c -o /tmp/cntx-selftest
+          /tmp/cntx-selftest
+
       - name: Format check
         run: cargo fmt --check
 
@@ -43,3 +55,9 @@ jobs:
 
       - name: Build
         run: cargo build
+
+      - name: Package completeness
+        run: cargo package --list
+
+      - name: Clean install into a temporary root
+        run: cargo install --path . --root /tmp/cntx-ci-root --quiet

@@ -52,6 +52,10 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub max_tokens: Option<usize>,
+    /// Stable conversation/session id sent as `x-opencode-session` on
+    /// OpenCode Go endpoints. The same conversation keeps the same id across
+    /// tools, counsel, retries, and compaction; `/clear` starts a new one.
+    pub session_id: Option<String>,
 }
 
 #[async_trait]
@@ -95,19 +99,28 @@ pub async fn stream_chat_with_retry(
 ) -> Result<()> {
     let mut backoff = INITIAL_BACKOFF_MS;
     for attempt in 0..=MAX_RETRIES {
-        match adapter
-            .stream_chat(endpoint, request.clone(), on_delta)
-            .await
-        {
+        let mut emitted = false;
+        let mut forward = |delta: String| {
+            emitted |= !delta.is_empty();
+            on_delta(delta);
+        };
+        let result = tokio::select! {
+            result = adapter.stream_chat(endpoint, request.clone(), &mut forward) => result,
+            _ = crate::interactive::wait_for_interrupt() => Err(anyhow!("provider request interrupted")),
+        };
+        match result {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < MAX_RETRIES && is_retryable_error(&e) => {
+            Err(e) if !emitted && attempt < MAX_RETRIES && is_retryable_error(&e) => {
                 eprintln!(
                     "  retrying in {}s (attempt {}/{})",
                     backoff / 1000,
                     attempt + 1,
                     MAX_RETRIES
                 );
-                tokio::time::sleep(Duration::from_millis(backoff)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(backoff)) => {},
+                    _ = crate::interactive::wait_for_interrupt() => return Err(anyhow!("provider request interrupted")),
+                }
                 backoff *= 2;
             }
             Err(e) => return Err(e),
@@ -136,14 +149,14 @@ fn is_retryable_error(error: &anyhow::Error) -> bool {
         || msg.contains("reset")
 }
 
-fn client(endpoint: &EndpointConfig) -> Result<reqwest::Client> {
+pub(crate) fn client(endpoint: &EndpointConfig) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(endpoint.timeout_secs))
         .build()
         .context("failed to build HTTP client")
 }
 
-fn join_url(base_url: &str, path: &str) -> String {
+pub(crate) fn join_url(base_url: &str, path: &str) -> String {
     format!(
         "{}/{}",
         base_url.trim_end_matches('/'),
@@ -165,6 +178,12 @@ fn endpoint_path(endpoint: &EndpointConfig, key: &str, default: &str) -> String 
 fn headers(endpoint: &EndpointConfig, provider: &ProviderKind) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    // Client identity: always send our own user agent so subscription
+    // gateways (including OpenCode Go) recognize the client.
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        HeaderValue::from_str(&format!("cntx/{}", env!("CARGO_PKG_VERSION")))?,
+    );
 
     match provider {
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::OllamaCloud => {
@@ -204,6 +223,52 @@ fn headers(endpoint: &EndpointConfig, provider: &ProviderKind) -> Result<HeaderM
     Ok(headers)
 }
 
+/// Attach the OpenCode Go session header on Go endpoints when a session id
+/// is present in the request.
+fn with_session_header(
+    mut headers: HeaderMap,
+    endpoint: &EndpointConfig,
+    request: &ChatRequest,
+) -> HeaderMap {
+    if endpoint.preset_identity() == Some("opencode-go") {
+        if let Some(session) = request.session_id.as_deref() {
+            if let Ok(value) = HeaderValue::from_str(session) {
+                headers.insert("x-opencode-session", value);
+            }
+        }
+    }
+    headers
+}
+
+/// Normalized model id for an endpoint: `opencode-go/<id>` collapses to
+/// `<id>` only for Go preset endpoints; no other prefixes are stripped.
+pub fn normalize_model_for_endpoint(endpoint: &EndpointConfig, model: &str) -> String {
+    if endpoint.preset_identity() == Some("opencode-go") {
+        if let Some(stripped) = model.strip_prefix("opencode-go/") {
+            return stripped.to_string();
+        }
+    }
+    model.to_string()
+}
+
+/// Resolve the API protocol for a Go preset endpoint: an explicit metadata
+/// `protocol` override wins, otherwise the model family decides. Unknown
+/// families stay unknown so callers can request an override.
+pub fn go_protocol(endpoint: &EndpointConfig, model: &str) -> i32 {
+    if endpoint.preset_identity() != Some("opencode-go") {
+        return crate::core::GO_PROTOCOL_UNKNOWN;
+    }
+    if let Some(override_name) = endpoint.protocol_override() {
+        return match override_name.trim().to_lowercase().as_str() {
+            "chat" | "chat-completions" => crate::core::GO_PROTOCOL_CHAT,
+            "messages" => crate::core::GO_PROTOCOL_MESSAGES,
+            "responses" => crate::core::GO_PROTOCOL_RESPONSES,
+            _ => crate::core::GO_PROTOCOL_UNKNOWN,
+        };
+    }
+    crate::core::go_protocol_for_model(model)
+}
+
 pub struct OpenAiLikeAdapter {
     provider: ProviderKind,
 }
@@ -238,50 +303,286 @@ impl ProviderAdapter for OpenAiLikeAdapter {
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .map(|message| json!({ "role": message.role, "content": message.content }))
-            .collect();
-        let mut body = json!({
-            "model": request.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(max_tokens) = request.max_tokens {
-            body["max_tokens"] = json!(max_tokens);
+        let model = normalize_model_for_endpoint(endpoint, &request.model);
+        match go_protocol(endpoint, &model) {
+            crate::core::GO_PROTOCOL_MESSAGES => {
+                stream_messages_compatible(endpoint, &model, request, on_delta).await
+            }
+            crate::core::GO_PROTOCOL_RESPONSES => {
+                stream_responses(endpoint, &model, request, on_delta).await
+            }
+            crate::core::GO_PROTOCOL_UNKNOWN if endpoint.preset_identity() == Some("opencode-go") =>
+                Err(anyhow!("unknown Go model family or protocol override; set endpoint metadata.protocol to chat, messages, or responses")),
+            _ => stream_chat_completions(endpoint, &model, request, on_delta).await,
         }
+    }
+}
 
-        let mut stream = client(endpoint)?
-            .post(join_url(
-                &endpoint.base_url,
-                &endpoint_path(endpoint, "chat_path", "chat/completions"),
-            ))
-            .headers(headers(endpoint, &self.provider)?)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes_stream();
+/// Standard `/chat/completions` streaming.
+async fn stream_chat_completions(
+    endpoint: &EndpointConfig,
+    model: &str,
+    request: ChatRequest,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> Result<()> {
+    let messages: Vec<Value> = request
+        .messages
+        .iter()
+        .map(|message| json!({ "role": message.role, "content": message.content }))
+        .collect();
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    if let Some(max_tokens) = request.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
 
-        let mut pending = String::new();
-        while let Some(chunk) = stream.next().await {
-            pending.push_str(&String::from_utf8_lossy(&chunk?));
-            consume_sse(&mut pending, |data| {
-                if data == "[DONE]" {
-                    return;
+    let request_headers = with_session_header(
+        headers(endpoint, &openai_kind_for(endpoint))?,
+        endpoint,
+        &request,
+    );
+    let mut stream = client(endpoint)?
+        .post(join_url(
+            &endpoint.base_url,
+            &endpoint_path(endpoint, "chat_path", "chat/completions"),
+        ))
+        .headers(request_headers)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
+
+    let mut pending = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk?);
+        if pending.len() > 1024 * 1024 {
+            anyhow::bail!("provider stream record exceeds 1 MiB");
+        }
+        consume_sse(&mut pending, |data| {
+            if data == "[DONE]" {
+                return;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                if let Some(content) = value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    on_delta(content.to_string());
                 }
-                if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    if let Some(content) = value
-                        .pointer("/choices/0/delta/content")
-                        .and_then(Value::as_str)
-                    {
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Anthropic-compatible `/messages` streaming as used by Go's MiniMax and
+/// Qwen families. Authentication stays the endpoint's Bearer scheme; system
+/// messages are merged so no skills/summaries/goal instructions are lost.
+async fn stream_messages_compatible(
+    endpoint: &EndpointConfig,
+    model: &str,
+    request: ChatRequest,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> Result<()> {
+    let messages: Vec<Value> = request
+        .messages
+        .iter()
+        .filter(|message| message.role != "system")
+        .map(|message| json!({ "role": message.role, "content": message.content }))
+        .collect();
+    let system = merged_system_text(&request.messages);
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": request.max_tokens.unwrap_or(4096),
+        "stream": true,
+    });
+    if let Some(system) = system {
+        body["system"] = Value::String(system);
+    }
+
+    let request_headers = with_session_header(
+        headers(endpoint, &openai_kind_for(endpoint))?,
+        endpoint,
+        &request,
+    );
+    let mut stream = client(endpoint)?
+        .post(join_url(
+            &endpoint.base_url,
+            &endpoint_path(endpoint, "chat_path", "messages"),
+        ))
+        .headers(request_headers)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
+
+    let mut pending = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk?);
+        if pending.len() > 1024 * 1024 {
+            anyhow::bail!("provider stream record exceeds 1 MiB");
+        }
+        consume_sse(&mut pending, |data| {
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                // Anthropic content_block_delta events carry text at
+                // /delta/text; a bare {type:"text", text:...} fallback
+                // covers gateway variants.
+                if let Some(content) = value.pointer("/delta/text").and_then(Value::as_str) {
+                    on_delta(content.to_string());
+                } else if value.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(content) = value.get("text").and_then(Value::as_str) {
                         on_delta(content.to_string());
                     }
                 }
-            });
+            }
+        });
+    }
+    Ok(())
+}
+
+/// OpenAI Responses `/responses` streaming (GPT/Grok/Muse families on Go).
+/// Parses text deltas, end-of-response events, and API error events.
+async fn stream_responses(
+    endpoint: &EndpointConfig,
+    model: &str,
+    request: ChatRequest,
+    on_delta: &mut (dyn FnMut(String) + Send),
+) -> Result<()> {
+    let mut input = Vec::with_capacity(request.messages.len());
+    let mut system_parts: Vec<&str> = Vec::new();
+    for message in &request.messages {
+        if message.role == "system" {
+            system_parts.push(&message.content);
+            continue;
         }
-        Ok(())
+        let type_name = if message.role == "assistant" {
+            "output_text"
+        } else {
+            "input_text"
+        };
+        input.push(json!({
+            "role": message.role,
+            "content": [{ "type": type_name, "text": message.content }]
+        }));
+    }
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "stream": true,
+    });
+    body["instructions"] = Value::String(system_parts.join("\n\n"));
+    if let Some(max_tokens) = request.max_tokens {
+        body["max_output_tokens"] = json!(max_tokens);
+    }
+
+    let request_headers = with_session_header(
+        headers(endpoint, &openai_kind_for(endpoint))?,
+        endpoint,
+        &request,
+    );
+    let mut stream = client(endpoint)?
+        .post(join_url(&endpoint.base_url, "responses"))
+        .headers(request_headers)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
+
+    let mut pending = Vec::new();
+    let mut ended = false;
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk?);
+        if pending.len() > 1024 * 1024 {
+            anyhow::bail!("provider stream record exceeds 1 MiB");
+        }
+        let mut error_message: Option<String> = None;
+        consume_sse(&mut pending, |data| {
+            if data == "[DONE]" {
+                ended = true;
+                return;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                return;
+            };
+            match value.get("type").and_then(Value::as_str) {
+                Some("response.output_text.delta") => {
+                    if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                        on_delta(delta.to_string());
+                    }
+                }
+                Some("response.completed") => {
+                    ended = true;
+                }
+                Some("response.incomplete") => {
+                    ended = true;
+                    error_message =
+                        Some("response incomplete; output limit or provider interruption".into());
+                }
+                Some("response.failed") => {
+                    ended = true;
+                    error_message = Some(
+                        value
+                            .pointer("/response/error/message")
+                            .or_else(|| value.pointer("/response/status"))
+                            .map(stringify_value)
+                            .unwrap_or_else(|| "response failed".to_string()),
+                    );
+                }
+                Some("error") => {
+                    ended = true;
+                    error_message = Some(
+                        value
+                            .pointer("/message")
+                            .map(stringify_value)
+                            .unwrap_or_else(|| "stream error".to_string()),
+                    );
+                }
+                _ => {}
+            }
+        });
+        if let Some(message) = error_message {
+            anyhow::bail!("Go responses stream error: {message}");
+        }
+        if ended {
+            break;
+        }
+    }
+    if !ended {
+        anyhow::bail!("responses stream ended before completion");
+    }
+    Ok(())
+}
+
+fn openai_kind_for(endpoint: &EndpointConfig) -> ProviderKind {
+    endpoint.provider.clone()
+}
+
+fn stringify_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Merge every system message instead of dropping extra ones so skills,
+/// summaries, and goal instructions all reach Anthropic-compatible models.
+fn merged_system_text(messages: &[ChatMessage]) -> Option<String> {
+    let parts: Vec<&str> = messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .map(|message| message.content.as_str())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -317,11 +618,9 @@ impl ProviderAdapter for AnthropicAdapter {
             .filter(|message| message.role != "system")
             .map(|message| json!({ "role": message.role, "content": message.content }))
             .collect();
-        let system = request
-            .messages
-            .iter()
-            .find(|message| message.role == "system")
-            .map(|message| message.content.clone());
+        // Merge ALL system messages: base instructions, skills, summaries,
+        // and goal instructions must all reach the model.
+        let system = merged_system_text(&request.messages);
         let mut body = json!({
             "model": request.model,
             "messages": messages,
@@ -344,9 +643,12 @@ impl ProviderAdapter for AnthropicAdapter {
             .error_for_status()?
             .bytes_stream();
 
-        let mut pending = String::new();
+        let mut pending = Vec::new();
         while let Some(chunk) = stream.next().await {
-            pending.push_str(&String::from_utf8_lossy(&chunk?));
+            pending.extend_from_slice(&chunk?);
+            if pending.len() > 1024 * 1024 {
+                anyhow::bail!("provider stream record exceeds 1 MiB");
+            }
             consume_sse(&mut pending, |data| {
                 if let Ok(value) = serde_json::from_str::<Value>(data) {
                     if let Some(content) = value.pointer("/delta/text").and_then(Value::as_str) {
@@ -429,9 +731,12 @@ impl ProviderAdapter for OllamaAdapter {
             .error_for_status()?
             .bytes_stream();
 
-        let mut pending = String::new();
+        let mut pending = Vec::new();
         while let Some(chunk) = stream.next().await {
-            pending.push_str(&String::from_utf8_lossy(&chunk?));
+            pending.extend_from_slice(&chunk?);
+            if pending.len() > 1024 * 1024 {
+                anyhow::bail!("provider stream record exceeds 1 MiB");
+            }
             consume_lines(&mut pending, |line| {
                 if let Ok(value) = serde_json::from_str::<Value>(line) {
                     if let Some(content) = value.pointer("/message/content").and_then(Value::as_str)
@@ -513,7 +818,7 @@ pub fn parse_ollama_models(value: &Value) -> Result<Vec<ModelInfo>> {
         let mut model = ModelInfo::new(id);
         model.display_name = item
             .get("name")
-            .and_then(Value::as_str)
+            .and_then(|value| value.as_str())
             .map(ToOwned::to_owned);
         model.created_at = item
             .get("modified_at")
@@ -528,6 +833,19 @@ pub fn parse_ollama_models(value: &Value) -> Result<Vec<ModelInfo>> {
         models.push(model);
     }
     Ok(models)
+}
+
+/// Context length from an Ollama `/api/show` response. The field name is
+/// `<family>.context_length` (e.g. `llama.context_length`), so match by
+/// suffix instead of hardcoding families.
+pub fn parse_ollama_context_window(value: &Value) -> Option<usize> {
+    value
+        .as_object()?
+        .iter()
+        .find(|(key, _)| key.ends_with(".context_length"))
+        .and_then(|(_, v)| v.as_u64())
+        .and_then(|window| usize::try_from(window).ok())
+        .filter(|window| *window > 0)
 }
 
 fn compact_metadata(value: &Value) -> BTreeMap<String, Value> {
@@ -567,27 +885,38 @@ fn compact_value(value: &Value, depth: usize) -> Value {
     }
 }
 
-fn consume_sse(pending: &mut String, mut on_data: impl FnMut(&str)) {
-    while let Some(index) = pending.find("\n\n") {
-        {
-            let event = &pending[..index];
-            for line in event.lines() {
-                if let Some(data) = line.strip_prefix("data:") {
-                    on_data(data.trim());
-                }
-            }
+fn consume_sse(pending: &mut Vec<u8>, mut on_data: impl FnMut(&str)) {
+    loop {
+        let lf = pending
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .map(|i| (i, 2));
+        let crlf = pending
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| (i, 4));
+        let Some((index, delimiter)) = lf.into_iter().chain(crlf).min_by_key(|v| v.0) else {
+            break;
+        };
+        let event = String::from_utf8_lossy(&pending[..index]);
+        let data = event
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !data.is_empty() {
+            on_data(&data);
         }
-        pending.drain(..index + 2);
+        pending.drain(..index + delimiter);
     }
 }
 
-fn consume_lines(pending: &mut String, mut on_line: impl FnMut(&str)) {
-    while let Some(index) = pending.find('\n') {
-        {
-            let line = pending[..index].trim();
-            if !line.is_empty() {
-                on_line(line);
-            }
+fn consume_lines(pending: &mut Vec<u8>, mut on_line: impl FnMut(&str)) {
+    while let Some(index) = pending.iter().position(|b| *b == b'\n') {
+        let line = String::from_utf8_lossy(&pending[..index]);
+        if !line.trim().is_empty() {
+            on_line(line.trim());
         }
         pending.drain(..index + 1);
     }
@@ -665,23 +994,92 @@ mod tests {
 
     #[test]
     fn streaming_sse_parser_drains_consumed_events() {
-        let mut pending = "event: delta\ndata: {\"ok\":true}\n\npartial".to_string();
+        let mut pending = b"event: delta\ndata: {\"ok\":true}\n\npartial".to_vec();
         let mut seen = Vec::new();
 
         consume_sse(&mut pending, |data| seen.push(data.to_string()));
 
         assert_eq!(seen, vec!["{\"ok\":true}"]);
-        assert_eq!(pending, "partial");
+        assert_eq!(pending, b"partial");
     }
 
     #[test]
     fn streaming_line_parser_drains_consumed_lines() {
-        let mut pending = "{\"a\":1}\n{\"b\":2}".to_string();
+        let mut pending = b"{\"a\":1}\n{\"b\":2}".to_vec();
         let mut seen = Vec::new();
 
         consume_lines(&mut pending, |line| seen.push(line.to_string()));
 
         assert_eq!(seen, vec!["{\"a\":1}"]);
-        assert_eq!(pending, "{\"b\":2}");
+        assert_eq!(pending, b"{\"b\":2}");
+    }
+
+    #[test]
+    fn sse_parser_accepts_crlf_events() {
+        let mut pending = b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\n".to_vec();
+        let mut seen = Vec::new();
+
+        consume_sse(&mut pending, |data| seen.push(data.to_string()));
+
+        assert_eq!(seen, vec!["{\"a\":1}", "{\"b\":2}"]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn sse_parser_keeps_split_utf8_pending_until_complete() {
+        // A UTF-8 sequence split across stream chunks must stay pending as
+        // raw bytes; the completed event decodes losslessly.
+        let mut pending = b"data: {\"t\":\"\xC3".to_vec();
+        let mut seen = Vec::new();
+        consume_sse(&mut pending, |data| seen.push(data.to_string()));
+        assert!(seen.is_empty());
+
+        pending.extend_from_slice(b"\xA9\"}\n\n");
+        consume_sse(&mut pending, |data| seen.push(data.to_string()));
+        assert_eq!(seen, vec!["{\"t\":\"é\"}"]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn line_parser_keeps_split_utf8_pending_until_complete() {
+        let mut pending = b"{\"t\":\"\xC3".to_vec();
+        let mut seen = Vec::new();
+        consume_lines(&mut pending, |line| seen.push(line.to_string()));
+        assert!(seen.is_empty());
+
+        pending.extend_from_slice(b"\xA9\"}\n");
+        consume_lines(&mut pending, |line| seen.push(line.to_string()));
+        assert_eq!(seen, vec!["{\"t\":\"é\"}"]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn sse_parser_keeps_unterminated_event_pending() {
+        let mut pending = b"data: {\"a\":1}".to_vec();
+        let mut seen = Vec::new();
+
+        consume_sse(&mut pending, |data| seen.push(data.to_string()));
+
+        assert!(seen.is_empty());
+        assert_eq!(pending, b"data: {\"a\":1}");
+    }
+
+    #[test]
+    fn parses_ollama_context_window_from_show_response() {
+        assert_eq!(
+            parse_ollama_context_window(&json!({
+                "llama.context_length": 131072,
+                "modelfile": "..."
+            })),
+            Some(131072)
+        );
+        assert_eq!(
+            parse_ollama_context_window(&json!({ "other.field": 1 })),
+            None
+        );
+        assert_eq!(
+            parse_ollama_context_window(&json!({ "a.context_length": 0 })),
+            None
+        );
     }
 }
