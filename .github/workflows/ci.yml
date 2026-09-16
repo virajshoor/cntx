@@ -38,7 +38,7 @@ jobs:
 
       - name: C self-test with sanitizers
         run: |
-          clang -std=c17 -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
+          clang -std=c17 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -fsanitize=address,undefined \
             -I csrc \
             csrc/agent.c csrc/context.c csrc/permissions.c csrc/routing.c csrc/tools.c \
             tests/c_selftest.c -o /tmp/cntx-selftest
