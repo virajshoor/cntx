@@ -121,11 +121,35 @@ The user explicitly requested ongoing handoff updates after each work chunk.
 4. ~~Audit remaining paths: counsel chat-only context, apply write-failure/
    symlink tests, secret filtering consistency, provider retry rules, known
    model context windows, goal evidence validation.~~ Done (items 3, 14-17).
-5. ~~Update HELP.md build/verify + first-run sections.~~ Done. Remaining doc
-   check: re-read `main/docs/*.md` against the current CLI before publishing.
-6. Run `main/scripts/verify.sh`, CLI mock smoke and PTY controls, package/install
-   checks. Review full diff, fetch remote, commit/push authorized changes, verify
-   exact-commit CI. Only then mark phases complete and tell user release ready.
+5. ~~Update HELP.md build/verify + first-run sections; docs consistency.~~ Done.
+6. ~~Run verify.sh, smoke checks, package/install, commit/push, verify CI.~~
+   Done on 2026-09-16:
+   - `sh main/scripts/verify.sh` green (C self-test under ASan/UBSan, fmt,
+     clippy, 91 tests, build, `cargo package --list`, temp-root install of
+     0.5.2). Fixed `c_selftest.c` to define `_DARWIN_C_SOURCE` before headers
+     so `mkdtemp` is visible.
+   - CLI smoke test: shipped debug binary against a local Python mock;
+     one-shot `--mode all-approve` created `smoke/note.txt` in a nested dir,
+     the second request carried "Tool result for 'write': Written 11 bytes",
+     auto-approve correctly asked for the write in a non-terminal (denied
+     without a mode override).
+   - Committed b3c5382 (all implementation) and 757aa58 (CI: define POSIX
+     2008 for the Linux C self-test) and pushed to origin/master.
+   - GitHub CI on 757aa58: **success** (ubuntu-latest + macos-latest verify
+     jobs, including C self-test, fmt, clippy, tests, build, package --list,
+     temp-root install). The first run failed on Linux because the CI
+     self-test lacked `_POSIX_C_SOURCE`; fixed in 757aa58.
+   - `claude-code`/`headroom` are committed gitlinks without `.gitmodules`;
+     checkout prints a harmless post-checkout warning. Unchanged by this work.
+   - `website/` is gitignored and untracked, so website content corrections
+     cannot ship via this repo; docs.html currently has no contradictory
+     claims (modes table matches).
+   - No live authenticated OpenCode Go test was performed; mock-verified only.
+   - Shift+Tab draft preservation verified in code + unit tests, not by a
+     manual PTY session.
+
+All phases A–H are complete. **The repository is updated; Cargo version
+remains 0.5.2; the user can now bump and publish the next CLI release.**
 
 ### Resume commands
 
