@@ -22,7 +22,7 @@ EOF
 then
     SAN="-fsanitize=address,undefined"
 fi
-clang -std=c17 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic $SAN \
+clang -std=c17 -Wall -Wextra -Wpedantic $SAN \
     -I "$REPO_ROOT/main/csrc" \
     "$REPO_ROOT/main/csrc/agent.c" \
     "$REPO_ROOT/main/csrc/context.c" \

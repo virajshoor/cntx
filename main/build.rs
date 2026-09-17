@@ -16,7 +16,6 @@ fn main() {
         .file("csrc/tools.c")
         .include("csrc")
         .std("c17")
-        .define("_POSIX_C_SOURCE", "200809L")
         .flag_if_supported("-Wall")
         .flag_if_supported("-Wextra")
         .flag_if_supported("-Wpedantic");

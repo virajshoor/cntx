@@ -2,10 +2,16 @@
  * AddressSanitizer and UndefinedBehaviorSanitizer. Covers success paths and
  * invalid-input paths for every C-owned decision. */
 
-/* mkdtemp is POSIX 2008 but macOS keeps it behind _DARWIN_C_SOURCE; the
- * define must precede every header. */
+/* Feature-test macros must precede every header: mkdtemp is POSIX 2008, but
+ * glibc under -std=c17 keeps parts of the family behind _DEFAULT_SOURCE and
+ * macOS keeps it behind _DARWIN_C_SOURCE. */
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
+#elif !defined(__APPLE__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
+#if !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
 #endif
 
 #include "cntx.h"
