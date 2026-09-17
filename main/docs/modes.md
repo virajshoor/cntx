@@ -11,9 +11,10 @@ default mode is `auto-approve` in both interactive and one-shot use.
 
 ## Decision table
 
-`Ask` means ask the human and execute only after `y`/`yes`; it never means
-allow silently. Denial produces a tool error without side effects and is never
-retried through a different tool.
+`Ask` means cntx pauses and shows a plain-language request ("Cntx wants to:
+write file "notes.txt"") and continues only after `y`/`yes`. It never means
+allow silently. Declining produces a tool error without side effects and is
+never retried through a different tool.
 
 | Operation | auto-approve | all-approve | manual-approve | file-only | counsel |
 | --- | --- | --- | --- | --- | --- |

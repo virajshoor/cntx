@@ -389,17 +389,38 @@ fn authorize_tool(
     }
 
     // 5. Approval when the policy asks.
-    if verdict.decision == PermissionDecision::Ask {
-        let detail = format!("{} {}", call.name, call.arguments);
-        if !approve(&detail) {
-            return Some(tool_error(
-                call,
-                "User denied approval. Do not retry or work around this denial.",
-            ));
-        }
+    if verdict.decision == PermissionDecision::Ask && !approve(&describe_action(call)) {
+        return Some(tool_error(
+            call,
+            "Skipped: you did not approve this step. The assistant must not retry it or work around the decision.",
+        ));
     }
 
     None
+}
+
+/// Plain-language summary of a tool call for approval prompts. File contents
+/// are never included: the path (or command) is enough to decide, and keeps
+/// terminal scrollback free of duplicated content.
+fn describe_action(call: &ToolCall) -> String {
+    let arg = |key: &str| {
+        call.arguments
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    };
+    match call.name.as_str() {
+        "read" => format!("read file \"{}\"", arg("path")),
+        "write" => format!("write file \"{}\"", arg("path")),
+        "edit" => format!("edit file \"{}\"", arg("path")),
+        "bash" => {
+            let short: String = arg("command").chars().take(120).collect();
+            format!("run command \"{short}\"")
+        }
+        "glob" => format!("list files matching \"{}\"", arg("pattern")),
+        "grep" => format!("search for \"{}\"", arg("pattern")),
+        _ => format!("use tool \"{}\"", call.name),
+    }
 }
 
 fn execute_authorized(call: &ToolCall, sandbox: &Sandbox, project_root: &Path) -> ToolResult {

@@ -72,15 +72,18 @@ impl Mode {
 }
 
 /// Approval is explicit and fail-closed, including redirected stdin and EOF.
+/// Prompts use plain language ("Cntx wants to: ...") so non-technical users
+/// can decide without reading raw tool JSON.
 pub fn confirm(action: &str) -> bool {
     use std::io::{self, IsTerminal, Write};
     if !io::stdin().is_terminal() {
         eprintln!(
-            "Approval required: {action}. Use an interactive terminal or --mode all-approve."
+            "Cntx needs your permission to {action}, but this is not an interactive terminal. Rerun interactively, or use --mode all-approve to allow permitted tools without prompting."
         );
         return false;
     }
-    eprint!("Approve {action}? [y/N] ");
+    eprintln!("Cntx wants to: {action}");
+    eprint!("Allow once? [y = yes / n = no] ");
     let _ = io::stderr().flush();
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).is_ok()

@@ -157,7 +157,7 @@ pub struct Runtime {
     pub active_skill: Option<crate::skills::Skill>,
     /// Running cost estimate for the current session (USD cents).
     pub cost_tracker: CostTracker,
-    /// Why the active goal paused: denied approval, blocker, or stall.
+    /// Why the active goal paused: declined step, blocker, or stall.
     pub goal_pause_reason: Option<String>,
     /// Consecutive goal turns with no tool action or progress update.
     pub goal_stall: u32,
@@ -875,7 +875,7 @@ impl Runtime {
                 return Ok(paused);
             }
             if let Some(reason) = self.goal_pause_reason.take() {
-                // Denied approval pauses the goal and returns control.
+                // A declined approval pauses the goal and returns control.
                 self.transition_goal(crate::core::GOAL_EVENT_PAUSE)?;
                 let paused = format!("goal paused: {reason}");
                 println!("{}", paused.yellow());
@@ -1119,7 +1119,7 @@ impl crate::tools::ToolHost for LoopHost<'_> {
     fn approve(&mut self, action: &str) -> bool {
         let approved = crate::permissions::confirm(action);
         if !approved {
-            *self.pause_reason = Some("user denied approval".to_string());
+            *self.pause_reason = Some("a step was not approved".to_string());
         }
         approved
     }
@@ -1402,6 +1402,22 @@ const DOC_PAGES: &[DocPage] = &[
     DocPage {
         title: "MCP",
         body: include_str!("../docs/mcp.md"),
+    },
+    DocPage {
+        title: "Quickstart for Teams",
+        body: include_str!("../docs/small-business-quickstart.md"),
+    },
+    DocPage {
+        title: "Team Admin Guide",
+        body: include_str!("../docs/team-admin-guide.md"),
+    },
+    DocPage {
+        title: "Security Overview",
+        body: include_str!("../docs/security-overview.md"),
+    },
+    DocPage {
+        title: "Enterprise Readiness",
+        body: include_str!("../docs/enterprise-readiness.md"),
     },
     DocPage {
         title: "Troubleshooting",

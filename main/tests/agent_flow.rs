@@ -254,7 +254,7 @@ fn denied_write_leaves_file_untouched_and_no_directories() {
         ))
         .unwrap();
     let second_request = server.request(1);
-    assert!(second_request.contains("User denied approval"));
+    assert!(second_request.contains("did not approve this step"));
     assert!(!root.join("newdir").exists());
     assert!(!root.join("newdir/out.txt").exists());
 }
@@ -285,7 +285,7 @@ fn manual_mode_asks_for_reads_and_denial_sends_no_contents() {
         .unwrap();
     // The read was asked, denied, and no contents reached the provider.
     let second_request = server.request(1);
-    assert!(second_request.contains("User denied approval"));
+    assert!(second_request.contains("did not approve this step"));
     assert!(!second_request.contains("classified contents"));
 }
 

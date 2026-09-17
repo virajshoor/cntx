@@ -114,6 +114,10 @@ still applies. `--dry-run` blocks mutations and shell execution.
 
 ## Documentation
 
+- [Quickstart for Teams](docs/small-business-quickstart.md)
+- [Team Admin Guide](docs/team-admin-guide.md)
+- [Security Overview](docs/security-overview.md)
+- [Enterprise Readiness](docs/enterprise-readiness.md)
 - [Changelog](CHANGELOG.md)
 - [Project explanation](EXPLAIN.md)
 - [Command reference](docs/commands.md)

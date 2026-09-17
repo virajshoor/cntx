@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Plain-language approval prompts: cntx now asks "Cntx wants to: write file
+  ..." with "Allow once? [y = yes / n = no]" instead of raw tool JSON, and
+  the decline message no longer reads like a system error.
+- New business docs: Small Business Quickstart, Team Admin Guide, Security
+  Overview, and Enterprise Readiness (all in `docs/` and the packaged docs
+  browser).
+
 - **C core**: the product's decisions now live in a C17 core (`csrc/`) linked
   through Cargo — approval-mode semantics, tool validation, file tools, bounded
   command execution, goal state transitions, context budgets, routing
