@@ -1391,6 +1391,10 @@ const DOC_PAGES: &[DocPage] = &[
         body: include_str!("../docs/goals.md"),
     },
     DocPage {
+        title: "Skills",
+        body: include_str!("../docs/skills.md"),
+    },
+    DocPage {
         title: "OpenCode Go",
         body: include_str!("../docs/opencode-go.md"),
     },

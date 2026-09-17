@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - 2026-09-17
+
+- Comprehensive Skills documentation: YAML format, user vs project
+  directories, `cntx skill` commands, `/skill` activation, and injection
+  behavior; the Skills page now also appears in the `cntx docs` browser.
+- Expanded Sessions documentation: storage paths, atomic saves, session-id
+  validation, and import/export safety rules (untrusted ids get new ids,
+  duplicates never overwrite).
+
 ## 0.6.0 - 2026-09-17
 
 - **Smarter auto-approve (behavior change)**: in-project writes and edits no

@@ -1,6 +1,11 @@
 # Sessions
 
-Cntx stores sessions as YAML in the config directory.
+Cntx persists conversation state locally as YAML under the configuration
+directory (`$CNTX_CONFIG_DIR/sessions/`; on macOS
+`~/Library/Application Support/cntxcode/sessions/`, on Linux
+`~/.config/cntxcode/sessions/`). Session ids become filenames; unsafe ids
+(path separators, `..`, leading `.`/`-`, over 128 characters) are rejected
+and never reach the filesystem.
 
 ```bash
 cntx session list
@@ -14,11 +19,22 @@ cntx session import session.json
 
 Sessions save user messages, assistant tool requests, tool results, and final
 responses. Saving happens atomically after each tool result and state
-transition, so an interrupted turn keeps its history. Each session records:
+transition — the file is written to a temporary name and renamed, so an
+interrupted turn or a crash keeps its history. Each session records:
 
 - the workspace root it belongs to,
-- an optional compaction summary and the index of the first message it covers,
+- an optional compaction summary and the index of the first message it covers
+  (older messages stay on disk but are omitted from requests),
 - the current goal (objective, status, progress, evidence, step counts).
+
+## Importing and exporting
+
+Exports are pretty-printed JSON; imports accept either format. Imported data
+is untrusted: a missing or unsafe session id is replaced with a fresh one
+(warned on stderr), and an import whose id already exists on disk never
+overwrites the existing session — it gets a new id too. The format is
+intentionally plain YAML/JSON so future tools can index, search, compact,
+and migrate sessions.
 
 ## Resuming
 
@@ -47,6 +63,3 @@ session is preserved — requests are never sent oversized.
 New turns can reference earlier file changes and command results because tool
 results stay in the conversation history, bounded by `routing.history_turns`
 and the context budget.
-
-The session format is intentionally plain YAML/JSON so future tools can index,
-search, compact, and migrate sessions.
