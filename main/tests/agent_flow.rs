@@ -137,9 +137,13 @@ impl ToolHost for TestHost {
         self.dry_run
     }
 
-    fn approve(&mut self, action: &str) -> bool {
+    fn approve(&mut self, action: &str) -> cntx::permissions::ApprovalChoice {
         self.approvals.lock().unwrap().push(action.to_string());
-        self.approve
+        if self.approve {
+            cntx::permissions::ApprovalChoice::Once
+        } else {
+            cntx::permissions::ApprovalChoice::No
+        }
     }
 
     fn record_transcript(&mut self, role: &str, content: &str) -> anyhow::Result<()> {
@@ -228,13 +232,13 @@ fn create_edit_execute_round_trip_through_mock_provider() {
 }
 
 #[test]
-fn denied_write_leaves_file_untouched_and_no_directories() {
+fn denied_shell_leaves_no_side_effects() {
     let server = MockServer::new(vec![
         sse(&tool_call_text(
-            "write",
-            r#"{"path":"newdir/out.txt","content":"should not exist"}"#,
+            "bash",
+            r#"{"command":"mkdir newdir && echo should not exist > newdir/out.txt"}"#,
         )),
-        sse("Understood; I will not write the file."),
+        sse("Understood; I will not run that command."),
     ]);
     let (_guard, root) = workspace();
     let mut host = TestHost {
@@ -244,7 +248,7 @@ fn denied_write_leaves_file_untouched_and_no_directories() {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(cntx::tools::run_tool_loop(
-            "write newdir/out.txt",
+            "create newdir/out.txt via shell",
             &Sandbox::new(Mode::Auto, root.clone(), Vec::new()),
             &root,
             &server.endpoint(),
@@ -613,8 +617,8 @@ fn goal_denial_pauses_and_keeps_the_goal_resumable() {
     // through the same loop with a fresh bounded budget.
     let server = MockServer::new(vec![
         sse(&tool_call_text(
-            "write",
-            r#"{"path":"denied.txt","content":"nope"}"#,
+            "bash",
+            r#"{"command":"echo nope > denied.txt"}"#,
         )),
         sse(&tool_call_text(
             "goal_update",
@@ -622,12 +626,13 @@ fn goal_denial_pauses_and_keeps_the_goal_resumable() {
         )),
         sse(&tool_call_text(
             "goal_update",
-            r#"{"status":"completed","evidence":"user denied the write; no executable check applies"}"#,
+            r#"{"status":"completed","evidence":"user declined the command; no executable check applies"}"#,
         )),
     ]);
     let (_guard, root) = workspace();
     let mut runtime = mock_runtime(&root, server.endpoint());
-    // auto-approve asks before writes; the test harness has no terminal.
+    // auto-approve asks before shell commands; the test harness has no
+    // terminal, so the prompt denies.
     runtime.mode = Mode::Auto;
     runtime.sandbox = Sandbox::new(Mode::Auto, root.clone(), Vec::new());
 

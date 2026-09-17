@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0 - 2026-09-17
+
+- **Smarter auto-approve (behavior change)**: in-project writes and edits no
+  longer prompt — reading and writing code is the core action. Only shell
+  commands ask, and the prompt gained `ya` to approve commands for the rest
+  of the session (`y` = once, `n` = decline unchanged).
+- Added `cntx man` to print the man page (`man/cntx.1`), installable to
+  `/usr/local/share/man/man1/`.
+- Documented the new approval table everywhere: modes, sandbox, README,
+  quickstart, team admin guide, security overview.
+
 ## Unreleased
 
 - Plain-language approval prompts: cntx now asks "Cntx wants to: write file

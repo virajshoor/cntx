@@ -489,12 +489,15 @@ mod tests {
 
     #[test]
     fn permission_table_matches_contract() {
-        // auto-approve: reads allowed, writes/shell ask
+        // auto-approve: reads and in-project writes allowed, shell asks
         assert_eq!(
             permission_decide(MODE_AUTO_APPROVE, OP_READ),
             DECISION_ALLOW
         );
-        assert_eq!(permission_decide(MODE_AUTO_APPROVE, OP_WRITE), DECISION_ASK);
+        assert_eq!(
+            permission_decide(MODE_AUTO_APPROVE, OP_WRITE),
+            DECISION_ALLOW
+        );
         assert_eq!(permission_decide(MODE_AUTO_APPROVE, OP_SHELL), DECISION_ASK);
         // all-approve allows everything
         assert_eq!(
@@ -511,7 +514,7 @@ mod tests {
         assert_eq!(permission_decide(MODE_FILE_ONLY, OP_WRITE), DECISION_ALLOW);
         // counsel matches auto
         assert_eq!(permission_decide(MODE_COUNSEL, OP_READ), DECISION_ALLOW);
-        assert_eq!(permission_decide(MODE_COUNSEL, OP_WRITE), DECISION_ASK);
+        assert_eq!(permission_decide(MODE_COUNSEL, OP_WRITE), DECISION_ALLOW);
         // out-of-range denies
         assert_eq!(permission_decide(99, OP_READ), DECISION_DENY);
     }

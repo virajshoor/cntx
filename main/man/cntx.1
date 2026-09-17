@@ -1,0 +1,129 @@
+.TH CNTX 1 "2026-09-17" "cntx 0.6.0" "User Commands"
+.SH NAME
+cntx \- BYOK, token-efficient AI coding assistant for the terminal
+.SH SYNOPSIS
+.B cntx
+.RI [options]
+.RI [PROMPT...]
+.br
+.B cntx
+.I subcommand
+.RI [args]
+.SH DESCRIPTION
+.B cntx
+is a terminal AI coding assistant. You configure an AI provider (bring your
+own key); cntx reads, writes, and edits files and runs shell commands inside
+your project sandbox under permission modes you control.
+.SH OPTIONS
+.TP
+.B \-\-mode
+Approval mode: auto-approve (default), all-approve, manual-approve,
+file-only, counsel.
+.TP
+.B \-\-model
+Model id or alias for this prompt.
+.TP
+.B \-\-endpoint
+Endpoint name to use.
+.TP
+.B \-\-effort
+Investigation depth: low, medium, high.
+.TP
+.B \-\-dry\-run
+Block file writes and shell execution; preview only.
+.TP
+.B \-\-allow\-write
+PATH: add a writable directory outside the project root (repeatable).
+.TP
+.B \-\-refresh\-models
+Refresh model lists from configured provider APIs.
+.TP
+.B \-\-chat\-only
+Run text-only: no file writes or shell commands.
+.SH SUBCOMMANDS
+.TP
+.B init
+First-run provider/endpoint/key/model setup.
+.TP
+.B endpoint
+Create, list, change, remove endpoints; \-\-set\-primary, \-\-import.
+.TP
+.B api-key
+Add, list (masked), change, delete provider keys in the local secrets file.
+.TP
+.B provider
+Custom provider presets; install\-preset.
+.TP
+.B model, config, session, memory, mcp, skill
+Model aliases and cache, configuration, sessions, project memory, MCP
+servers, reusable skills.
+.TP
+.B bench
+Estimate optimization, routing, and rough cost without calling a model.
+.TP
+.B doctor
+Config, keys, and environment diagnostics (\-\-fix repairs; \-\-verify runs
+the full test suite).
+.TP
+.B completions
+Generate shell completions.
+.TP
+.B man
+Print this manual page. Install it with:
+.B cntx man > \e$(dirname \e$(manpath 2>/dev/null | head -1) 2>/dev/null || echo /usr/local/share/man/man1)/cntx.1
+or simply: cntx man | sudo tee /usr/local/share/man/man1/cntx.1
+.SH APPROVAL MODES
+auto-approve (default): reads and in-project writes run without prompts;
+shell commands ask with
+.B y
+(allow once),
+.B ya
+(allow commands for the rest of the session),
+.B n
+(decline).
+all-approve: everything permitted runs without prompting.
+manual-approve: every tool asks first.
+file-only: files allowed (in-sandbox), shell/network denied.
+counsel: token-efficient model mix; same approval behavior as auto-approve.
+File edits are always confined to the project root unless widened with
+.B \-\-allow\-write
+or disabled with
+.B \-\-dangerously\-disable\-sandbox
+(not recommended). The sandbox is application policy, not OS isolation.
+.SH ENVIRONMENT
+.TP
+.B OPENCODE_GO_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OLLAMA_API_KEY
+Provider API keys; or store keys with cntx api-key add.
+.TP
+.B CNTX_CONFIG_DIR
+Override the configuration directory (default:
+$HOME/Library/Application Support/cntxcode on macOS, $HOME/.config/cntxcode
+on Linux).
+.SH FILES
+.TP
+.I $CNTX_CONFIG_DIR/secrets.yaml
+API keys (mode 0600).
+.TP
+.I $CNTX_CONFIG_DIR/config.yaml
+Endpoints, primary selection, routing settings.
+.TP
+.I .cntx/memory.md, AGENTS.md
+Project memory and instructions loaded per session.
+.SH EXAMPLES
+.TP
+cntx init \-\-provider anthropic
+Configure Anthropic.
+.TP
+cntx "add pagination to the users endpoint and run the tests"
+One-shot task with tools.
+.TP
+cntx \-\-mode manual\-approve "show me what you would change"
+Ask before every step.
+.SH SEE ALSO
+Full docs inside the tool: cntx docs. Online: https://cntxcode.com/docs
+.SH LICENSE
+MIT
+.SH BUGS
+Report at https://github.com/virajshoor/cntx/issues
+.SH AUTHOR
+Viraj Shoor and cntx contributors.

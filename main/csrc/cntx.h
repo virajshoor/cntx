@@ -51,7 +51,7 @@ typedef enum cntx_decision {
 } cntx_decision_t;
 
 typedef enum cntx_mode {
-    CNTX_MODE_AUTO_APPROVE = 0, /* reads allowed; writes/commands ask */
+    CNTX_MODE_AUTO_APPROVE = 0, /* reads and in-project writes allowed; commands ask */
     CNTX_MODE_COUNSEL = 1,      /* counsel evaluation; same policy as auto */
     CNTX_MODE_ALL_APPROVE = 2,  /* permitted tools run without prompting */
     CNTX_MODE_MANUAL_APPROVE = 3, /* every tool asks first */

@@ -85,8 +85,9 @@ pub trait ToolHost: Send {
     }
     /// True when mutations and commands must be blocked (dry-run).
     fn dry_run(&self) -> bool;
-    /// Ask the human; execute only after explicit yes.
-    fn approve(&mut self, action: &str) -> bool;
+    /// Ask the human; execute only after explicit yes. `Always` also covers
+    /// later actions of the same kind for the session.
+    fn approve(&mut self, action: &str) -> crate::permissions::ApprovalChoice;
     /// Handle a validated goal_update action while a goal runs.
     fn goal_update(&mut self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("no active goal; goal_update is only valid during a goal run".to_string())
@@ -341,7 +342,7 @@ pub fn execute_tool(
     sandbox: &Sandbox,
     project_root: &Path,
     dry_run: bool,
-    approve: &mut dyn FnMut(&str) -> bool,
+    approve: &mut dyn FnMut(&str) -> crate::permissions::ApprovalChoice,
 ) -> ToolResult {
     if let Some(result) = authorize_tool(call, sandbox, project_root, dry_run, approve) {
         return result;
@@ -354,7 +355,7 @@ fn authorize_tool(
     sandbox: &Sandbox,
     project_root: &Path,
     dry_run: bool,
-    approve: &mut dyn FnMut(&str) -> bool,
+    approve: &mut dyn FnMut(&str) -> crate::permissions::ApprovalChoice,
 ) -> Option<ToolResult> {
     use crate::permissions::{Operation, PermissionDecision};
     // 1. Validate name and arguments (C core).
@@ -389,7 +390,7 @@ fn authorize_tool(
     }
 
     // 5. Approval when the policy asks.
-    if verdict.decision == PermissionDecision::Ask && !approve(&describe_action(call)) {
+    if verdict.decision == PermissionDecision::Ask && !approve(&describe_action(call)).allowed() {
         return Some(tool_error(
             call,
             "Skipped: you did not approve this step. The assistant must not retry it or work around the decision.",

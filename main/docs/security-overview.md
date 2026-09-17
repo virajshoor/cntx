@@ -36,8 +36,9 @@ documented in [Providers](providers.md) and [MCP](mcp.md).
 - File writes are confined to the project root; `..` traversal, dangling
   symlinks, and outside-root writes are denied (`--allow-write <root>`
   extends the boundary explicitly).
-- Approval modes decide when a human is asked: `auto-approve` asks before
-  writes/shell, `all-approve` runs permitted tools without prompting,
+- Approval modes decide when a human is asked: `auto-approve` writes code
+  freely and asks before shell commands (`y` once, `ya` for the session,
+  `n` declines), `all-approve` runs permitted tools without prompting,
   `manual-approve` asks before everything, `file-only` denies shell/network.
 - An approved shell command runs with your user privileges and can reach the
   wider machine, like any command you type yourself.

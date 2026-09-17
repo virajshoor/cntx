@@ -71,8 +71,8 @@ it exists for workflows where the assistant must edit across many roots.
 
 The sandbox works together with permission modes:
 
-- `auto-approve` (default): reads allowed; writes inside the sandbox ask first;
-  shell and network ask first.
+- `auto-approve` (default): reads and in-project writes allowed; shell and
+  network ask first; commands can be approved for the session with `ya`.
 - `all-approve`: writes inside the sandbox proceed without asking; shell and
   network proceed without asking. Writes outside the sandbox are still denied.
 - `manual-approve`: ask before any operation.

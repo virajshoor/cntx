@@ -50,8 +50,9 @@ machine; `cntx doctor --fix` repairs missing files.
 
 ## Sensible team defaults
 
-- Start everyone on `auto-approve` (asks before writes/shell). Power users can
-  opt into `all-approve`; auditors can use `manual-approve` or `file-only`.
+- Start everyone on `auto-approve` (in-project writes run, commands ask once
+  per session with `ya`). Power users can opt into `all-approve`; auditors
+  can use `manual-approve` or `file-only`.
 - Point project memory at `.cntx/memory.md` and shared instructions at
   `AGENTS.md` so team conventions load automatically.
 - Sessions persist locally per machine; export with `cntx session --export`

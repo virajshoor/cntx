@@ -19,9 +19,14 @@ never retried through a different tool.
 | Operation | auto-approve | all-approve | manual-approve | file-only | counsel |
 | --- | --- | --- | --- | --- | --- |
 | Explicit read/glob/grep tool | Allow | Allow | Ask | Allow | Allow |
-| In-root write/edit/apply | Ask | Allow | Ask | Allow | Ask |
+| In-root write/edit/apply | Allow | Allow | Ask | Allow | Allow |
 | Shell command | Ask | Allow | Ask | Deny | Ask |
 | Outside-root direct write | Deny | Deny | Deny | Deny | Deny |
+
+Writing code inside the sandbox is the core action, so auto-approve does it
+without prompting; only shell commands still ask, with a prompt offering
+`y` (allow once), `ya` (allow commands for the rest of the session), or
+`n` (decline).
 
 Outside-root writes become eligible only with `--allow-write <root>` or the
 explicit `--dangerously-disable-sandbox` flag; their approval decision then
@@ -29,7 +34,7 @@ follows the selected mode. `all-approve` never disables file containment.
 
 ## auto-approve (default)
 
-Allows reads and asks before writes and shell commands.
+Allows reads and in-project writes and asks before shell commands.
 
 ## all-approve
 

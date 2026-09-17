@@ -36,8 +36,8 @@ static void test_permission_table(void) {
               CNTX_DECISION_ALLOW,
           "auto-approve allows reads");
     CHECK(cntx_permission_decide(CNTX_MODE_AUTO_APPROVE, CNTX_OP_WRITE) ==
-              CNTX_DECISION_ASK,
-          "auto-approve asks for writes");
+              CNTX_DECISION_ALLOW,
+          "auto-approve allows in-project writes");
     CHECK(cntx_permission_decide(CNTX_MODE_AUTO_APPROVE, CNTX_OP_SHELL) ==
               CNTX_DECISION_ASK,
           "auto-approve asks for shell");
@@ -57,8 +57,8 @@ static void test_permission_table(void) {
               CNTX_DECISION_ALLOW,
           "file-only allows writes");
     CHECK(cntx_permission_decide(CNTX_MODE_COUNSEL, CNTX_OP_WRITE) ==
-              CNTX_DECISION_ASK,
-          "counsel asks for writes");
+              CNTX_DECISION_ALLOW,
+          "counsel allows writes like auto-approve");
     /* Out-of-range inputs deny. */
     CHECK(cntx_permission_decide(99, CNTX_OP_READ) == CNTX_DECISION_DENY,
           "out-of-range mode denies");

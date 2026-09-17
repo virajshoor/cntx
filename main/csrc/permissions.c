@@ -9,12 +9,15 @@
  *
  * | Operation                    | auto | all | manual | file-only | counsel |
  * | Explicit read/glob/grep tool | Allow| Allow| Ask   | Allow     | Allow   |
- * | In-root write/edit/apply     | Ask  | Allow| Ask   | Allow     | Ask     |
+ * | In-root write/edit/apply     | Allow| Allow| Ask   | Allow     | Allow   |
  * | Shell command                | Ask  | Allow| Ask   | Deny      | Ask     |
  * | Outside-root direct write    | Deny | Deny | Deny  | Deny      | Deny    |
  *
  * Outside-root denial is layered on top of the mode decision by the sandbox
  * (containment check in Rust); this table only expresses the mode policy.
+ * Writing code inside the sandbox is the product's core action, so
+ * auto-approve allows it; only shell commands still ask (with
+ * once/always/no choices).
  */
 cntx_decision_t cntx_permission_decide(int mode, int operation) {
     if (mode < CNTX_MODE_AUTO_APPROVE || mode > CNTX_MODE_FILE_ONLY ||
@@ -40,8 +43,9 @@ cntx_decision_t cntx_permission_decide(int mode, int operation) {
     default:
         switch (operation) {
         case CNTX_OP_READ:
+        case CNTX_OP_WRITE:
             return CNTX_DECISION_ALLOW;
-        default: /* write, shell, network */
+        default: /* shell, network */
             return CNTX_DECISION_ASK;
         }
     }
@@ -67,7 +71,7 @@ const char *cntx_mode_canonical_name(int mode) {
 const char *cntx_mode_description(int mode) {
     switch (mode) {
     case CNTX_MODE_AUTO_APPROVE:
-        return "allow reads and require approval for writes or shell actions";
+        return "allow reads and in-project writes; commands ask first (ya approves commands for the session)";
     case CNTX_MODE_COUNSEL:
         return "use token-efficient model counsel; same approval behavior as auto-approve";
     case CNTX_MODE_ALL_APPROVE:

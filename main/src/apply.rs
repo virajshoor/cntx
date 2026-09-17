@@ -368,13 +368,9 @@ fn write_one(sandbox: &Sandbox, file: &ProposedFile, root: &Path) -> ApplyOutcom
         name: "write".into(),
         arguments: serde_json::json!({ "path": target, "content": file.content }),
     };
-    let result = crate::tools::execute_tool(
-        &call,
-        sandbox,
-        root,
-        false,
-        &mut crate::permissions::confirm,
-    );
+    let result = crate::tools::execute_tool(&call, sandbox, root, false, &mut |action| {
+        crate::permissions::confirm(action)
+    });
     ApplyOutcome {
         path: file.path.clone(),
         status: if !result.is_error {

@@ -133,6 +133,8 @@ pub enum Command {
         #[arg(long, help = "Print the sandbox summary as YAML")]
         yaml: bool,
     },
+    /// Print the man page; pipe it into man or install it system-wide.
+    Man,
     /// Show configuration paths and a diagnostics summary.
     Doctor {
         #[arg(

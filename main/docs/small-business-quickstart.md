@@ -49,7 +49,8 @@ cntx "add pagination to the users endpoint and run the tests"
 cntx --mode manual-approve "show me exactly what you would change"
 ```
 
-- Default mode `auto-approve` asks before writes and shell commands.
+- Default mode `auto-approve` writes code freely and asks before shell
+  commands (`ya` approves commands for the whole session).
 - `/mode` inside a session shows and changes the mode.
 - `/compact` summarizes older turns when context fills up.
 - `cntx --dry-run "..."` previews without changing anything.

@@ -103,8 +103,7 @@ compacted 14 messages (session 7f3c... unchanged)
 
 | Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel |
 | --- | --- | --- | --- | --- | --- |
-| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow |
-| In-root write/edit | Ask | Allow | Ask | Allow | Ask |
+| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow || In-root write/edit | Allow | Allow | Ask | Allow | Allow |
 | Shell command | Ask | Allow | Ask | Deny | Ask |
 | Outside-root write | Deny | Deny | Deny | Deny | Deny |
 

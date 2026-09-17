@@ -71,23 +71,47 @@ impl Mode {
     }
 }
 
-/// Approval is explicit and fail-closed, including redirected stdin and EOF.
-/// Prompts use plain language ("Cntx wants to: ...") so non-technical users
-/// can decide without reading raw tool JSON.
-pub fn confirm(action: &str) -> bool {
+/// Outcome of an interactive approval prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalChoice {
+    /// Allow this action once.
+    Once,
+    /// Allow this action and every later one of the same kind this session.
+    Always,
+    /// Decline; the assistant must not retry.
+    No,
+}
+
+impl ApprovalChoice {
+    pub fn allowed(self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
+
+/// Approval is explicit and fail-closed, including redirected stdin and EOF
+/// (EOF denies rather than loops). Prompts use plain language ("Cntx wants
+/// to: ...") so non-technical users can decide without reading raw tool
+/// JSON, and offer y (once), ya (always for this session), or n (no).
+pub fn confirm(action: &str) -> ApprovalChoice {
     use std::io::{self, IsTerminal, Write};
     if !io::stdin().is_terminal() {
         eprintln!(
             "Cntx needs your permission to {action}, but this is not an interactive terminal. Rerun interactively, or use --mode all-approve to allow permitted tools without prompting."
         );
-        return false;
+        return ApprovalChoice::No;
     }
     eprintln!("Cntx wants to: {action}");
-    eprint!("Allow once? [y = yes / n = no] ");
+    eprint!("Allow? [y = once / ya = always for this session / n = no] ");
     let _ = io::stderr().flush();
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer).is_ok()
-        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    if io::stdin().read_line(&mut answer).is_err() {
+        return ApprovalChoice::No;
+    }
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "ya" | "a" => ApprovalChoice::Always,
+        "y" | "yes" => ApprovalChoice::Once,
+        _ => ApprovalChoice::No,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

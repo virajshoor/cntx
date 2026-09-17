@@ -241,11 +241,15 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_asks_for_writes_inside_root() {
+    fn auto_mode_allows_writes_inside_root() {
         let (_guard, root) = make_root();
         let sandbox = Sandbox::new(Mode::Auto, root.clone(), Vec::new());
         let verdict = sandbox.evaluate(Operation::WriteFile, Some(&root.join("src/lib.rs")));
-        assert_eq!(verdict.decision, PermissionDecision::Ask);
+        assert_eq!(verdict.decision, PermissionDecision::Allow);
+        assert_eq!(
+            sandbox.evaluate(Operation::Shell, None).decision,
+            PermissionDecision::Ask
+        );
     }
 
     #[test]

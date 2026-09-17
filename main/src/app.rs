@@ -93,6 +93,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Session(command)) => handle_session(command, &store).await,
         Some(Command::Skill(command)) => handle_skill(command, &store),
         Some(Command::Sandbox { yaml }) => handle_sandbox(&cli, &config, yaml),
+        Some(Command::Man) => {
+            print!("{}", include_str!("../man/cntx.1"));
+            Ok(())
+        }
         Some(Command::Doctor { fix, json, verify }) => {
             handle_doctor(&store, &mut config, fix, json, verify)
         }
@@ -100,7 +104,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let prompt = cli.prompt.join(" ");
             let interactive = prompt.trim().is_empty();
             // The mode stays exactly as configured; the default `auto-approve`
-            // policy already allows reads and asks before writes/commands.
+            // policy already allows reads and in-project writes; commands ask.
             // Interactive upgrades are never applied silently.
             let sandbox = build_sandbox_with_mode(&cli, cli.mode);
             // Tool mode is the default for interactive sessions and one-shot
@@ -314,6 +318,7 @@ impl Runtime {
                     pause_reason: &mut self.goal_pause_reason,
                     had_action: &mut self.turn_had_action,
                     dry_run: self.dry_run,
+                    approve_commands_for_session: false,
                 },
             )
             .await;
@@ -412,6 +417,7 @@ impl Runtime {
             pause_reason: &mut self.goal_pause_reason,
             had_action: &mut self.turn_had_action,
             dry_run: self.dry_run,
+            approve_commands_for_session: false,
         }
         .before_request()
     }
@@ -629,6 +635,7 @@ impl Runtime {
                 pause_reason: &mut self.goal_pause_reason,
                 had_action: &mut self.turn_had_action,
                 dry_run: self.dry_run,
+                approve_commands_for_session: false,
             },
         )
         .await
@@ -1108,6 +1115,9 @@ struct LoopHost<'a> {
     dry_run: bool,
     goal_running: bool,
     budget: usize,
+    /// Set when the user answers "ya" to a command prompt: later shell
+    /// commands run for the rest of the session without re-prompting.
+    approve_commands_for_session: bool,
 }
 
 #[async_trait::async_trait]
@@ -1116,12 +1126,21 @@ impl crate::tools::ToolHost for LoopHost<'_> {
         self.dry_run
     }
 
-    fn approve(&mut self, action: &str) -> bool {
-        let approved = crate::permissions::confirm(action);
-        if !approved {
+    fn approve(&mut self, action: &str) -> crate::permissions::ApprovalChoice {
+        // "ya" on a command prompt sticks for the rest of the session.
+        if self.approve_commands_for_session && action.starts_with("run command ") {
+            return crate::permissions::ApprovalChoice::Always;
+        }
+        let choice = crate::permissions::confirm(action);
+        if choice == crate::permissions::ApprovalChoice::Always
+            && action.starts_with("run command ")
+        {
+            self.approve_commands_for_session = true;
+        }
+        if !choice.allowed() {
             *self.pause_reason = Some("a step was not approved".to_string());
         }
-        approved
+        choice
     }
 
     /// Validate a `goal_update` action from the model. Only accepted while a

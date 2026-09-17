@@ -74,7 +74,7 @@ pub fn build_prompt_input_with_scan(prompt: &str, root: &Path, scan_project: boo
 pub fn build_prompt_input_with_approval(
     prompt: &str,
     root: &Path,
-    approve: &dyn Fn(&str) -> bool,
+    approve: &dyn Fn(&str) -> crate::permissions::ApprovalChoice,
 ) -> PromptInput {
     // Describe the bundle without reading file contents first.
     let mut bundle: Vec<String> = Vec::new();
@@ -104,7 +104,7 @@ pub fn build_prompt_input_with_approval(
         "Include project context before sending: {}",
         bundle.join(", ")
     );
-    if approve(&request) {
+    if approve(&request).allowed() {
         // Approved: read and assemble, still without the implicit scan.
         build_prompt_input_inner(prompt, root, false, true)
     } else {
