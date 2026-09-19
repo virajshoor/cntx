@@ -6,3 +6,15 @@
 __pycache__/
 target/
 website/
+
+# Local secrets and env — never commit
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.p12
+*.pfx
+secrets.yaml
+**/api_keys.local.rs
+**/*.local.rs

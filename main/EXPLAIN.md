@@ -51,7 +51,9 @@ Implemented systems:
   sandbox and prints a reusable checklist
 - built-in MCP servers (Context7 doc search, Headroom token saving) plus custom MCPs
 - permission modes: auto-approve (default), all-approve, manual-approve,
-  counsel, file-only, with legacy aliases preserved
+  counsel, file-only, plan (read-only), with legacy aliases preserved
+- native provider `tools[]` where supported, packed tool results, outline
+  context for auto-selected files, and `/usage` from stream usage events
 - persistent goals (`/goal`) with validated progress updates, step budgets,
   stall detection, and pause/resume/cancel
 - OpenCode Go subscription provider with per-family protocol routing
@@ -128,7 +130,7 @@ The current optimizer and prompt context layer:
 - adds a few keyword-matched project file excerpts while skipping obvious
   dependency, build, binary, and secret files
 
-Project context selection is bounded so large files do not create unbounded memory pressure. It reads a capped prefix and stores short excerpts.
+Project context selection is bounded so large files do not create unbounded memory pressure. Explicit `@path` references get capped excerpts; auto-selected files get short outlines (and symbol snippets when useful) instead of full bodies.
 
 Counsel mode is also token-efficient. It does not send the complete optimized prompt to every model. Instead, it sends a bounded preview to the evaluator model, then sends the optimized prompt plus a short evaluator note to the selected worker model.
 
@@ -251,7 +253,9 @@ Cntx Code ships two built-in capabilities as on-demand MCP servers:
 - Headroom, surfaced as built-in token saving (`headroom_compress`, `headroom_retrieve`, `headroom_stats`)
 
 Servers run as local stdio subprocesses and are spawned only when you ask for them,
-so ordinary prompts stay fast. Custom MCP servers can be added from YAML or the CLI.
+so ordinary prompts stay fast. Custom MCP servers can be added from YAML or the
+CLI; when enabled, their tools are also registered into the agent loop as
+`mcp__<server>__<tool>`.
 
 See [Doc search and token saving](docs/mcp.md).
 

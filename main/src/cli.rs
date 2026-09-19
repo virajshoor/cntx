@@ -80,6 +80,10 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Tools")]
     pub chat_only: bool,
 
+    /// Emit JSONL turn/usage events on stdout (headless / CI).
+    #[arg(long, global = true, help_heading = "Output")]
+    pub jsonl: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 

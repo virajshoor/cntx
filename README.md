@@ -91,19 +91,20 @@ mode: manual-approve - ask before every tool, file, or shell operation.
 Selectable with `/mode <name>` or Shift+Tab cycling. `Ask` means the human
 must answer `y`/`yes`; denial is never retried or worked around.
 
-| Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel |
-| --- | --- | --- | --- | --- | --- |
-| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow |
-| In-root write/edit | Ask | Allow | Ask | Allow | Ask |
-| Shell command | Ask | Allow | Ask | Deny | Ask |
-| Outside-root write | Deny | Deny | Deny | Deny | Deny |
+| Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel | plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow | Allow |
+| In-root write/edit | Allow | Allow | Ask | Allow | Allow | Deny |
+| Shell command | Ask | Allow | Ask | Deny | Ask | Deny |
+| Outside-root write | Deny | Deny | Deny | Deny | Deny | Deny |
 
 The boundary between direct file tools and the shell: file writes are
 path-contained by the sandbox (symlink and traversal escapes are rejected).
 Shell commands are **application policy, not OS isolation** — an approved
 command can access the wider machine, exactly as one you typed yourself could.
 Outside-root writes need `--allow-write <root>`; containment removal needs
-explicit `--dangerously-disable-sandbox`.
+explicit `--dangerously-disable-sandbox`. Use `/mode plan` for read-only
+exploration before allowing mutations.
 
 ## Commands and sessions
 
@@ -119,14 +120,17 @@ explicit `--dangerously-disable-sandbox`.
 | `/compact` | Summarize older turns; session id stays the same |
 | `/clear` | Fresh session; endpoint/model/mode/effort carry over |
 | `/dry-run` | Block mutations and shell execution |
-| `/cost`, `/status`, `/sandbox`, `/theme` | Session diagnostics |
+| `/cost`, `/usage` | Session cost estimate; last-turn and session provider usage |
+| `/status`, `/sandbox`, `/theme` | Session diagnostics |
 
 Tool results, assistant tool requests, and goal state are persisted after every
 step, so a follow-up turn — or `/resume` in a new shell — keeps the execution
-history. Compaction keeps the summary, goal, decisions, and recent turns while
-omitting covered old messages from provider requests. Token counts are
-estimates; goals stop cleanly on step limits, denials, blockers, or Ctrl+C and
-never loop unboundedly.
+history. Large tool outputs are packed for the model (sha256 + on-disk
+artifact) while the full transcript stays local. Compaction keeps the summary,
+goal, decisions, and recent turns while omitting covered old messages from
+provider requests. Provider stream usage is preferred when available; goals
+stop cleanly on step limits, denials, blockers, or Ctrl+C and never loop
+unboundedly.
 
 ## Architecture
 

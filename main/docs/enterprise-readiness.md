@@ -9,12 +9,12 @@ Status of enterprise controls in cntx. "Today" describes the current release;
 | --- | --- | --- |
 | SSO / SAML / OIDC / SCIM | Not supported; identity is local user | Roadmap: external IdP for team console |
 | Central audit log | Local YAML session transcripts only | Roadmap: append-only export (SIEM/S3); today: collect `sessions/` via MDM |
-| RBAC / team roles | Five global approval modes per user | Enforce `manual-approve`/`file-only` by policy; roadmap: managed policy push |
+| RBAC / team roles | Six global approval modes per user (incl. plan) | Enforce `manual-approve`/`file-only`/`plan` by policy; roadmap: managed policy push |
 | Secrets management | Local `secrets.yaml` (0600) + env vars | Distribute via existing device management; roadmap: vault/KMS |
 | Key rotation / expiry | Manual at provider + re-add | Document rotation runbook per provider |
 | Deployment (MDM/GPO/containers) | `cargo install` per machine | Script install + `endpoint --import`; roadmap: signed binaries, containers |
 | Data residency | BYOK: data goes to your provider | Choose provider regions; self-hosted Ollama Local keeps data on-machine |
-| DLP / PII redaction | Secret-filename blocklist only | Review prompts before sending; roadmap: redaction filters |
+| DLP / PII redaction | Filename blocklist + content redaction for key=value secrets, PEM, and common token prefixes before send | Review prompts; extend patterns as needed |
 | Audit of shell actions | Transcript shows commands run | Collect transcripts centrally today |
 | SLA / support tier | Best effort via repo issues | Paid support: roadmap |
 

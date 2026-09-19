@@ -9,3 +9,9 @@
 secrets.yaml
 api_keys.local.rs
 *.local.rs
+.env
+.env.*
+!.env.example
+
+# Local knowledge-graph build artifacts (can be large; regenerate with graphify)
+graphify-out/

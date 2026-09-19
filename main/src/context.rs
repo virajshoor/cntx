@@ -191,20 +191,44 @@ fn build_prompt_input_inner(
                     continue;
                 }
                 seen.insert(relative.clone());
-                let excerpt = trim_chars(&candidate.excerpt, MAX_EXCERPT_CHARS);
+                // Auto-selected files inject outlines, not full excerpts.
+                let outline = crate::index::file_outline(&candidate.path)
+                    .unwrap_or_else(|| trim_chars(&candidate.excerpt, 400));
+                let outline = trim_chars(&outline, 800);
                 report.files.push(PromptContextFile {
                     path: relative.clone(),
                     score: candidate.score,
-                    excerpt_chars: excerpt.chars().count(),
+                    excerpt_chars: outline.chars().count(),
                     source: ContextSource::Search,
                 });
                 sections.push(format!(
-                    "Relevant file `{}` (score {}):\n```text path={}\n{}\n```",
+                    "Relevant file outline `{}` (score {}):\n```text path={}\n{}\n```",
                     relative.display(),
                     candidate.score,
                     relative.display(),
-                    excerpt.trim_end()
+                    outline.trim_end()
                 ));
+            }
+        }
+        // Symbol-oriented prompts get a small definition span instead of
+        // multiple raw excerpts.
+        if let Some(symbol) = prompt
+            .split_whitespace()
+            .find(|token| token.len() > 2 && token.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        {
+            if prompt.to_ascii_lowercase().contains("where")
+                || prompt.to_ascii_lowercase().contains("defined")
+                || prompt.to_ascii_lowercase().contains("definition")
+            {
+                if let Some((rel, span)) = crate::index::symbol_span(root, symbol) {
+                    if !seen.contains(&rel) {
+                        sections.push(format!(
+                            "Symbol span for `{symbol}` in `{}`:\n```text\n{}\n```",
+                            rel.display(),
+                            span
+                        ));
+                    }
+                }
             }
         }
     }
@@ -216,11 +240,11 @@ fn build_prompt_input_inner(
         };
     }
 
-    let text = format!(
+    let text = crate::blocklist::redact_secrets(&format!(
         "Use the bounded project context below when it is relevant. Do not assume omitted files are irrelevant.\n\n{}\n\nUser request:\n{}",
         sections.join("\n\n"),
         prompt
-    );
+    ));
     PromptInput {
         text,
         context: report,
@@ -390,28 +414,81 @@ fn trim_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-/// Full uncovered transcript; no fixed-message window silently discards tools.
-pub fn session_history(session: &crate::sessions::Session) -> Vec<crate::providers::ChatMessage> {
+/// Full uncovered transcript bounded by `history_turns` user turns.
+/// `history_turns == 0` disables history. Compaction summary always included.
+pub fn session_history(
+    session: &crate::sessions::Session,
+    history_turns: usize,
+) -> Vec<crate::providers::ChatMessage> {
     let mut history = Vec::new();
     if let Some(summary) = &session.summary {
         history.push(crate::providers::ChatMessage {
             role: "system".into(),
             content: format!("Previous conversation summary:\n{summary}"),
+            cacheable: false,
         });
     }
-    history.extend(
-        session.messages[session.context_start_index.min(session.messages.len())..]
-            .iter()
-            .map(|m| crate::providers::ChatMessage {
-                role: if m.role == "tool_result" {
-                    "user".into()
-                } else {
-                    m.role.clone()
-                },
-                content: m.content.clone(),
-            }),
-    );
+    if history_turns == 0 {
+        return history;
+    }
+    let start = session.context_start_index.min(session.messages.len());
+    let slice = &session.messages[start..];
+    // Count user turns from the end; keep that many plus intervening messages.
+    let mut user_seen = 0usize;
+    let mut keep_from = slice.len();
+    for (i, msg) in slice.iter().enumerate().rev() {
+        if msg.role == "user" {
+            user_seen += 1;
+            if user_seen > history_turns {
+                keep_from = i + 1;
+                break;
+            }
+        }
+        keep_from = i;
+    }
+    history.extend(slice[keep_from..].iter().map(|m| {
+        crate::providers::ChatMessage {
+            role: if m.role == "tool_result" {
+                "user".into()
+            } else {
+                m.role.clone()
+            },
+            // Prefer packed stub when the transcript stored full+stub.
+            content: model_visible_tool_content(&m.content),
+            cacheable: false,
+        }
+    }));
     history
+}
+
+fn model_visible_tool_content(content: &str) -> String {
+    if let Some((visible, _)) = content.split_once("\n---full---\n") {
+        visible.to_string()
+    } else {
+        content.to_string()
+    }
+}
+
+/// Stable cacheable project memory + AGENTS.md for the prompt prefix.
+pub fn cacheable_project_prefix(root: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(memory) = read_project_memory(root) {
+        parts.push(format!(
+            "Project memory:\n{}",
+            crate::blocklist::redact_secrets(&memory)
+        ));
+    }
+    if let Some(instructions) = read_project_instructions(root) {
+        parts.push(format!(
+            "Project instructions:\n{}",
+            crate::blocklist::redact_secrets(&instructions)
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 pub fn messages_tokens(messages: &[crate::providers::ChatMessage]) -> usize {
@@ -475,9 +552,11 @@ pub async fn compact_session(
                 messages: vec![ChatMessage {
                     role: "user".into(),
                     content: format!("{prefix}{chunk}"),
+                    cacheable: false,
                 }],
                 max_tokens: Some(1024),
                 session_id: Some(session.id.clone()),
+                tools: Vec::new(),
             };
             if messages_tokens(&request.messages) > budget {
                 anyhow::bail!("compaction request exceeds budget; session preserved");

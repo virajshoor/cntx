@@ -39,13 +39,14 @@ cntx mcp tools headroom
 ## Why Servers Are Spawned On Demand
 
 MCP servers are local subprocesses. Cntx Code spawns one only when you run
-`cntx mcp tools <name>` or when an agent loop calls a tool. A normal prompt never
-launches a subprocess, so startup stays fast and there is no background noise.
+`cntx mcp tools <name>` or when the agent loop needs a selected custom MCP tool.
+A normal prompt never launches built-in MCP subprocesses, so startup stays fast.
 
-> **Note:** The autonomous agent loop that invokes MCP tools during a normal prompt
-> is not yet implemented. Today `cntx mcp tools <name>` is a manual inspection tool
-> you use to connect to a server and list the tools it exposes. Automatic
-> invocation of those tools by the assistant during `--tool-use` is planned.
+Built-in servers (`context7`, `headroom`) are inspected with `cntx mcp tools` and are
+**not** injected into every `tools[]` request. Enabled **custom** (non-built-in) MCP
+servers are listed once per session and exposed to the model as
+`mcp__<server>__<tool>` entries in the native tool schema. Calls run through the same
+validate → permission → timeout/cap → pack path as built-in tools.
 
 ## Adding A Custom MCP Server
 

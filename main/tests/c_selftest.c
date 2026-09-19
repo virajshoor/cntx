@@ -59,6 +59,15 @@ static void test_permission_table(void) {
     CHECK(cntx_permission_decide(CNTX_MODE_COUNSEL, CNTX_OP_WRITE) ==
               CNTX_DECISION_ALLOW,
           "counsel allows writes like auto-approve");
+    CHECK(cntx_permission_decide(CNTX_MODE_PLAN, CNTX_OP_READ) ==
+              CNTX_DECISION_ALLOW,
+          "plan allows reads");
+    CHECK(cntx_permission_decide(CNTX_MODE_PLAN, CNTX_OP_WRITE) ==
+              CNTX_DECISION_DENY,
+          "plan denies writes");
+    CHECK(cntx_permission_decide(CNTX_MODE_PLAN, CNTX_OP_SHELL) ==
+              CNTX_DECISION_DENY,
+          "plan denies shell");
     /* Out-of-range inputs deny. */
     CHECK(cntx_permission_decide(99, CNTX_OP_READ) == CNTX_DECISION_DENY,
           "out-of-range mode denies");
@@ -88,10 +97,14 @@ static void test_mode_helpers(void) {
     CHECK(cntx_mode_next(CNTX_MODE_AUTO_APPROVE) == CNTX_MODE_ALL_APPROVE,
           "cycle auto to all");
     CHECK(cntx_mode_next(CNTX_MODE_MANUAL_APPROVE) ==
-              CNTX_MODE_AUTO_APPROVE,
-          "cycle manual to auto");
+              CNTX_MODE_PLAN,
+          "cycle manual to plan");
+    CHECK(cntx_mode_next(CNTX_MODE_PLAN) == CNTX_MODE_AUTO_APPROVE,
+          "cycle plan to auto");
     CHECK(cntx_mode_next(CNTX_MODE_FILE_ONLY) == CNTX_MODE_AUTO_APPROVE,
           "legacy mode returns to auto");
+    CHECK(cntx_mode_parse("plan", &mode) == CNTX_OK && mode == CNTX_MODE_PLAN,
+          "parse plan");
 }
 
 static void test_tool_validation(void) {

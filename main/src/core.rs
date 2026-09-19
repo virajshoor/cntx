@@ -16,6 +16,7 @@ pub const MODE_COUNSEL: i32 = 1;
 pub const MODE_ALL_APPROVE: i32 = 2;
 pub const MODE_MANUAL_APPROVE: i32 = 3;
 pub const MODE_FILE_ONLY: i32 = 4;
+pub const MODE_PLAN: i32 = 5;
 
 /// Operation codes matching `cntx_op_t`.
 pub const OP_READ: i32 = 0;
@@ -203,7 +204,8 @@ pub fn mode_description(mode: i32) -> Option<&'static str> {
 pub fn mode_parse(name: &str) -> Option<i32> {
     let c_name = cstring(name).ok()?;
     let mut out: c_int = -1;
-    if unsafe { cntx_mode_parse(c_name.as_ptr(), &mut out) } == 0 && (0..=4).contains(&out) {
+    if unsafe { cntx_mode_parse(c_name.as_ptr(), &mut out) } == 0 && (0..=MODE_PLAN).contains(&out)
+    {
         Some(out)
     } else {
         None
@@ -529,6 +531,7 @@ mod tests {
         assert_eq!(mode_parse("request-permission"), Some(MODE_MANUAL_APPROVE));
         assert_eq!(mode_parse("counsel"), Some(MODE_COUNSEL));
         assert_eq!(mode_parse("file-only"), Some(MODE_FILE_ONLY));
+        assert_eq!(mode_parse("plan"), Some(MODE_PLAN));
         assert_eq!(mode_parse("bogus"), None);
         assert_eq!(mode_canonical_name(MODE_ALL_APPROVE), Some("all-approve"));
         assert_eq!(
@@ -541,7 +544,8 @@ mod tests {
     fn mode_cycle_is_three_canonical_modes() {
         assert_eq!(mode_next(MODE_AUTO_APPROVE), MODE_ALL_APPROVE);
         assert_eq!(mode_next(MODE_ALL_APPROVE), MODE_MANUAL_APPROVE);
-        assert_eq!(mode_next(MODE_MANUAL_APPROVE), MODE_AUTO_APPROVE);
+        assert_eq!(mode_next(MODE_MANUAL_APPROVE), MODE_PLAN);
+        assert_eq!(mode_next(MODE_PLAN), MODE_AUTO_APPROVE);
         // Legacy extras return to the canonical default.
         assert_eq!(mode_next(MODE_COUNSEL), MODE_AUTO_APPROVE);
         assert_eq!(mode_next(MODE_FILE_ONLY), MODE_AUTO_APPROVE);

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Token wedge: native provider `tools[]` (OpenAI/Anthropic) with slim system
+  prompts, Anthropic `cache_control` on system/tools, and SSE usage parsing
+  into `CostTracker` / `/usage`.
+- `routing.history_turns` now bounds session history; large tool results are
+  packed (sha256 + artifact pointer) for the model while full output is kept
+  on disk.
+- Custom MCP servers participate in `run_tool_loop` as `mcp__server__tool`
+  (builtins stay on `cntx mcp` only).
+- Outline/symbol context for auto-selected files; new `plan` approval mode
+  (read/glob/grep only).
+- Content secret redaction before send; `--jsonl` headless turn events;
+  `scripts/eval_tokens.sh` smoke metrics.
+
 ## 0.6.1 - 2026-09-17
 
 - Comprehensive Skills documentation: YAML format, user vs project

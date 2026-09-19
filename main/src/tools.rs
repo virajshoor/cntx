@@ -44,6 +44,30 @@ pub struct ToolLoopPromptContext {
     pub goal: Option<GoalPromptState>,
     /// Stable conversation id for the OpenCode Go session header.
     pub session_id: Option<String>,
+    /// Optional project memory / AGENTS.md for the stable cacheable prefix.
+    pub cacheable_project: Option<String>,
+    /// Extra MCP tool specs selected for this session (not builtins).
+    pub mcp_tools: Vec<crate::providers::ToolSpec>,
+    /// Directory for full tool-result artifacts (packed stubs point here).
+    pub artifacts_dir: Option<std::path::PathBuf>,
+    /// Optional MCP servers to call by prefixed name `mcp__<server>__<tool>`.
+    pub mcp_servers: Vec<crate::config::McpServerConfig>,
+}
+
+impl Default for ToolLoopPromptContext {
+    fn default() -> Self {
+        Self {
+            history: Vec::new(),
+            skill_prompt: None,
+            effort: crate::config::Effort::Medium,
+            goal: None,
+            session_id: None,
+            cacheable_project: None,
+            mcp_tools: Vec::new(),
+            artifacts_dir: None,
+            mcp_servers: Vec::new(),
+        }
+    }
 }
 
 /// Goal information injected into tool-loop requests.
@@ -103,6 +127,8 @@ pub trait ToolHost: Send {
     fn stopped(&self) -> bool {
         false
     }
+    /// Record provider token usage from the last stream.
+    fn record_usage(&mut self, _usage: &crate::providers::TokenUsage) {}
 }
 
 /// Get the tool definitions for the model.
@@ -216,12 +242,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Build the tool-use system instruction that tells the model how to call tools.
+/// Build the slim tool-use system instruction (schemas go in request.tools).
 pub fn tool_use_system_instruction(
     effort: crate::config::Effort,
     goal: Option<&GoalPromptState>,
 ) -> String {
-    let defs = tool_definitions();
     let mut instruction = format!(
         "You are Cntx Code, a coding assistant running locally in the user's terminal. \
 You have direct access to the user's filesystem and can read, write, and edit files, run shell commands, \
@@ -232,20 +257,12 @@ Respond in the same language the user writes in (English, Chinese, Spanish, etc.
 Be concise and direct. Write correct, working code. Use markdown for formatting. \
 Do not add unnecessary preamble or postamble.\n\n\
 Effort level: {}. {}\n\n\
-You have access to tools that let you read, write, and edit files, run shell commands, \
-and search the project. When you need to perform an action, call the appropriate tool.\n\n\
-Available tools:\n",
+Use tools via the provider tool API. Fallback: <tool>{{\"name\":\"...\",\"arguments\":{{...}}}}</tool>.\n\
+Prefer glob, grep, and outline-style discovery before full file reads.\n\
+Available tools: read, write, edit, bash, glob, grep.\n",
         effort.as_str(),
         effort.instruction(),
     );
-    for tool in &defs {
-        instruction.push_str(&format!(
-            "- **{}**: {}  \n  Input: {}\n",
-            tool.name,
-            tool.description,
-            serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default()
-        ));
-    }
     if let Some(goal) = goal {
         instruction.push_str(&format!(
             "\nYou are working toward a persistent goal.\n\
@@ -261,21 +278,26 @@ Report goal state with the `goal_update` tool:\n\
             goal.status,
             goal.steps_used,
             goal.max_steps,
-            if goal.progress.is_empty() { "(none yet)" } else { &goal.progress },
+            if goal.progress.is_empty() {
+                "(none yet)"
+            } else {
+                &goal.progress
+            },
         ));
     }
-    instruction.push_str(
-        "\nTo call a tool, output a JSON block on its own line wrapped in <tool> tags.\n\
-         The JSON must have \"name\" and \"arguments\" keys. Examples:\n\
-         <tool>{\"name\":\"read\",\"arguments\":{\"path\":\"src/main.rs\"}}</tool>\n\
-         <tool>{\"name\":\"write\",\"arguments\":{\"path\":\"script.py\",\"content\":\"print('hi')\"}}</tool>\n\
-         <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"python3 script.py\",\"description\":\"run script\"}}</tool>\n\
-         <tool>{\"name\":\"glob\",\"arguments\":{\"pattern\":\"src/**/*.rs\"}}</tool>\n\
-         <tool>{\"name\":\"grep\",\"arguments\":{\"pattern\":\"TODO\",\"path\":\"*.rs\"}}</tool>\n\n\
-         Output one tool call at a time. After receiving the tool result, you can call another tool or provide your final response. \
-         When you are done, just respond normally without a <tool> block.",
-    );
     instruction
+}
+
+/// Convert built-in tool definitions into provider ToolSpec values.
+pub fn builtin_tool_specs() -> Vec<crate::providers::ToolSpec> {
+    tool_definitions()
+        .into_iter()
+        .map(|tool| crate::providers::ToolSpec {
+            name: tool.name.to_string(),
+            description: tool.description.to_string(),
+            input_schema: tool.input_schema,
+        })
+        .collect()
 }
 
 /// Parse tool calls from the model's response text.
@@ -832,24 +854,25 @@ pub async fn run_tool_loop(
 ) -> Result<String> {
     let adapter = crate::providers::adapter_for(endpoint.provider.clone());
     let goal_state = prompt_context.goal.clone();
+    let artifacts_dir = prompt_context.artifacts_dir.clone();
+    let mcp_servers = prompt_context.mcp_servers.clone();
 
-    let mut messages = vec![crate::providers::ChatMessage {
-        role: "system".to_string(),
-        content: tool_use_system_instruction(prompt_context.effort, goal_state.as_ref()),
-    }];
-    // Inject the active skill's prompt as a system message if set.
-    if let Some(skill) = prompt_context.skill_prompt {
-        messages.push(crate::providers::ChatMessage {
-            role: "system".to_string(),
-            content: skill,
-        });
+    let mut messages = vec![crate::providers::ChatMessage::cacheable(
+        "system",
+        tool_use_system_instruction(prompt_context.effort, goal_state.as_ref()),
+    )];
+    if let Some(project) = prompt_context.cacheable_project {
+        messages.push(crate::providers::ChatMessage::cacheable("system", project));
     }
-    // Inject prior session turns for multi-turn context.
+    if let Some(skill) = prompt_context.skill_prompt {
+        messages.push(crate::providers::ChatMessage::new("system", skill));
+    }
     messages.extend(prompt_context.history);
-    messages.push(crate::providers::ChatMessage {
-        role: "user".to_string(),
-        content: prompt.to_string(),
-    });
+    messages.push(crate::providers::ChatMessage::new("user", prompt));
+    crate::pack::dedupe_packed_reads(&mut messages);
+
+    let mut tools = builtin_tool_specs();
+    tools.extend(prompt_context.mcp_tools);
 
     let max_iterations = crate::core::tool_iteration_limit() as usize;
     let mut correction_attempts = 0u32;
@@ -871,6 +894,7 @@ pub async fn run_tool_loop(
             messages: messages.clone(),
             max_tokens: Some(4096),
             session_id: prompt_context.session_id.clone(),
+            tools: tools.clone(),
         };
 
         host.prepare_request(endpoint, &mut request).await?;
@@ -897,20 +921,23 @@ pub async fn run_tool_loop(
         .await;
 
         crate::ui::preview_stop();
-        if let Err(error) = streamed {
-            if !response.is_empty() {
-                host.record_transcript("assistant", &response)?;
+        let outcome = match streamed {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if !response.is_empty() {
+                    host.record_transcript("assistant", &response)?;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
+        host.record_usage(&outcome.usage);
 
-        // Check if interrupted
         if crate::interactive::was_interrupted() {
             eprintln!("\n{}", "(interrupted)".dimmed());
             return Ok(response);
         }
 
-        let tool_calls = match parse_tool_calls(&response) {
+        let mut tool_calls = match parse_tool_calls(&response) {
             Ok(calls) => calls,
             Err(parse_error) => {
                 if correction_attempts >= 2 {
@@ -926,58 +953,90 @@ pub async fn run_tool_loop(
                         "Tool protocol error: {parse_error}. Return one valid complete tool block."
                     ),
                 )?;
-                messages.push(crate::providers::ChatMessage {
-                    role: "assistant".to_string(),
-                    content: response.clone(),
-                });
-                messages.push(crate::providers::ChatMessage {
-                    role: "user".to_string(),
-                    content: format!(
+                messages.push(crate::providers::ChatMessage::new(
+                    "assistant",
+                    response.clone(),
+                ));
+                messages.push(crate::providers::ChatMessage::new(
+                    "user",
+                    format!(
                         "Tool protocol error: {parse_error}. Fix the call and repeat it as one complete, valid <tool>{{...}}</tool> block."
                     ),
-                });
+                ));
                 continue;
             }
         };
+        for native in outcome.tool_calls {
+            tool_calls.push(ToolCall {
+                name: native.name,
+                arguments: native.arguments,
+            });
+        }
         if tool_calls.is_empty() {
-            // No more tool calls; this is the final response
             return Ok(response);
         }
         correction_attempts = 0;
 
-        // Add the assistant's response (with tool calls) to the conversation
-        // and the persistent transcript.
-        messages.push(crate::providers::ChatMessage {
-            role: "assistant".to_string(),
-            content: response.clone(),
-        });
+        messages.push(crate::providers::ChatMessage::new(
+            "assistant",
+            response.clone(),
+        ));
         host.record_transcript("assistant", &response)?;
 
-        // Execute each tool call and add results. Do not execute subsequent
-        // calls after cancellation, and never misrepresent denied work.
         for call in &tool_calls {
             if crate::interactive::was_interrupted() {
                 eprintln!("\n{}", "(interrupted)".dimmed());
                 return Ok(response);
             }
             if call.name == "goal_update" {
-                // 8. Goal updates are validated by the host, never executed
-                // as a side effect.
                 let result_text = match host.goal_update(&call.arguments) {
                     Ok(message) => message,
                     Err(message) => format!("Error: {message}"),
                 };
                 crate::ui::print_tool_done("updating goal", false);
-                messages.push(crate::providers::ChatMessage {
-                    role: "user".to_string(),
-                    content: format!("Tool result for '{}':\n{}", call.name, result_text),
-                });
+                let packed = crate::pack::pack_tool_result(
+                    "goal_update",
+                    result_text.starts_with("Error:"),
+                    &result_text,
+                    artifacts_dir.as_deref(),
+                );
+                messages.push(crate::providers::ChatMessage::new(
+                    "user",
+                    format!("Tool result for '{}':\n{}", call.name, packed.model_visible),
+                ));
                 host.record_transcript(
                     "tool_result",
-                    &format!("Tool result for 'goal_update':\n{result_text}"),
+                    &format!("Tool result for 'goal_update':\n{}", packed.model_visible),
                 )?;
                 if host.stopped() {
                     return Ok(result_text);
+                }
+                continue;
+            }
+            if let Some(mcp_result) =
+                execute_mcp_tool(call, &mcp_servers, sandbox, host.dry_run(), &mut |action| {
+                    host.approve(action)
+                })
+                .await
+            {
+                let packed = crate::pack::pack_tool_result(
+                    &call.name,
+                    mcp_result.is_error,
+                    &mcp_result.output,
+                    artifacts_dir.as_deref(),
+                );
+                let progress = tool_call_progress(&call.name, &call.arguments);
+                crate::ui::print_tool_done(&progress, mcp_result.is_error);
+                messages.push(crate::providers::ChatMessage::new(
+                    "user",
+                    format!("Tool result for '{}':\n{}", call.name, packed.model_visible),
+                ));
+                host.record_transcript(
+                    "tool_result",
+                    &format!("Tool result for '{}':\n{}", call.name, packed.model_visible),
+                )?;
+                if host.stopped() {
+                    return Ok(packed.model_visible);
                 }
                 continue;
             }
@@ -995,26 +1054,84 @@ pub async fn run_tool_loop(
                 tokio::task::spawn_blocking(move || execute_authorized(&call, &sandbox, &root))
                     .await?
             };
-            let result_text = if result.is_error {
-                format!("Error: {}", result.output)
-            } else {
-                result.output.clone()
-            };
+            let packed = crate::pack::pack_tool_result(
+                &call.name,
+                result.is_error,
+                &result.output,
+                artifacts_dir.as_deref(),
+            );
             crate::ui::print_tool_done(&progress, result.is_error);
-            messages.push(crate::providers::ChatMessage {
-                role: "user".to_string(),
-                content: format!("Tool result for '{}':\n{}", call.name, result_text),
-            });
+            messages.push(crate::providers::ChatMessage::new(
+                "user",
+                format!("Tool result for '{}':\n{}", call.name, packed.model_visible),
+            ));
             host.record_transcript(
                 "tool_result",
-                &format!("Tool result for '{}':\n{}", call.name, result_text),
+                &format!(
+                    "Tool result for '{}':\n{}\n---full---\n{}",
+                    call.name, packed.model_visible, result.output
+                ),
             )?;
             if host.stopped() {
-                return Ok(result_text);
+                return Ok(packed.model_visible);
             }
         }
+        crate::pack::dedupe_packed_reads(&mut messages);
     }
     Ok("Execution paused: 25 provider turns used. Continue with another prompt.".into())
+}
+
+/// Execute `mcp__<server>__<tool>` calls. Returns None when the name is not MCP.
+async fn execute_mcp_tool(
+    call: &ToolCall,
+    servers: &[crate::config::McpServerConfig],
+    sandbox: &Sandbox,
+    dry_run: bool,
+    approve: &mut dyn FnMut(&str) -> crate::permissions::ApprovalChoice,
+) -> Option<ToolResult> {
+    let rest = call.name.strip_prefix("mcp__")?;
+    let (server_name, tool_name) = rest.split_once("__")?;
+    let server = servers.iter().find(|s| s.name == server_name)?;
+    let verdict = sandbox.evaluate(crate::permissions::Operation::Network, None);
+    match verdict.decision {
+        crate::permissions::PermissionDecision::Deny => {
+            return Some(tool_error(call, format!("Denied: {}", verdict.reason)));
+        }
+        crate::permissions::PermissionDecision::Ask => {
+            let choice = approve(&format!("call MCP tool {server_name}/{tool_name}"));
+            if !choice.allowed() {
+                return Some(tool_error(
+                    call,
+                    "Skipped: you did not approve this step. The assistant must not retry it or work around the decision.",
+                ));
+            }
+        }
+        crate::permissions::PermissionDecision::Allow => {}
+    }
+    if dry_run {
+        return Some(ToolResult {
+            tool_name: call.name.clone(),
+            output: "dry-run: MCP call not executed".into(),
+            is_error: false,
+        });
+    }
+    let mut client = match crate::mcp::McpClient::spawn(server) {
+        Ok(client) => client,
+        Err(err) => return Some(tool_error(call, format!("MCP spawn failed: {err}"))),
+    };
+    if let Err(err) = client.initialize().await {
+        return Some(tool_error(call, format!("MCP init failed: {err}")));
+    }
+    let result = match client.call_tool(tool_name, call.arguments.clone()).await {
+        Ok(value) => ToolResult {
+            tool_name: call.name.clone(),
+            output: value.to_string(),
+            is_error: false,
+        },
+        Err(err) => tool_error(call, format!("MCP call failed: {err}")),
+    };
+    client.shutdown().await;
+    Some(result)
 }
 
 /// Build a human-readable progress label for a tool call.

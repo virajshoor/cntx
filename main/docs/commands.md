@@ -19,7 +19,7 @@ Interactive commands:
 /help       - show available commands
 /status     - show endpoint, model, mode, sandbox, and apply state
 /mode       - show the active approval mode
-/mode <name> - switch modes: auto-approve, all-approve, manual-approve, counsel, file-only
+/mode <name> - switch modes: auto-approve, all-approve, manual-approve, counsel, file-only, plan
 /model      - show the effective endpoint and model
 /model <id> - switch the model for this session; /model auto restores routing
 /models     - list cached models grouped by endpoint
@@ -32,6 +32,7 @@ Interactive commands:
 /clear      - save the old session and start a fresh one
 /compact    - summarize older turns; the session id stays the same
 /cost       - show estimated token usage and cost for this session
+/usage      - show last-turn and session provider usage (input/output/cache)
 /apply      - toggle apply mode
 /dry-run    - block mutations and shell execution
 /checklist  - show files from the last apply run
@@ -46,32 +47,40 @@ Interactive commands:
 ```bash
 cntx --model <MODEL_OR_ALIAS>
 cntx --endpoint <ENDPOINT_NAME>
-cntx --mode auto-approve|all-approve|manual-approve|counsel|file-only
+cntx --mode auto-approve|all-approve|manual-approve|counsel|file-only|plan
 cntx --effort low|medium|high
 cntx --refresh-models
 cntx --docs                          # open packaged interactive docs
 cntx --no-interactive "single prompt"
+cntx --jsonl                         # emit JSONL turn/usage events (headless/CI)
 cntx --allow-write <PATH>            # extend the edit sandbox (repeatable)
 cntx --apply                         # write path= fenced blocks through sandbox
 cntx --dry-run                       # preview apply-mode writes without writing
 cntx --dangerously-disable-sandbox "edit anywhere"
 cntx --tool-use                      # compatible explicit tool-mode flag
 cntx --chat-only                     # text-only: no writes or shell commands
-cntx --goal                          # (goals are started with /goal in a session)
 ```
 
 Tool mode is on by default for interactive and one-shot prompts. `--apply`
 one-shot prompts use the separate apply path unless tool mode is explicitly
-selected.
+selected. `--jsonl` prints one JSON object per turn (model, tools, usage,
+stop reason) instead of markdown chat for CI harnesses.
 
 Prompts automatically include a small amount of bounded project context when it
-is useful. Use `@path/to/file` in a prompt to force an explicit file excerpt into
-the request while keeping the prompt capped.
+is useful. Explicit `@path` references get file excerpts; auto-selected files
+get short outlines. Use `@path/to/file` to force an excerpt while keeping the
+prompt capped.
 
 Counsel mode:
 
 ```bash
 cntx --mode counsel "refactor the endpoint code with minimal churn"
+```
+
+Plan mode (read-only until you switch):
+
+```bash
+cntx --mode plan "where is auth validated?"
 ```
 
 ## First Run And Diagnostics
@@ -170,7 +179,8 @@ cntx mcp disable filesystem
 cntx mcp remove filesystem
 ```
 
-See [Doc search and token saving](mcp.md).
+Custom (non-built-in) MCP tools are also registered into the agent tool loop as
+`mcp__<server>__<tool>` when the server is enabled. See [Doc search and token saving](mcp.md).
 
 ## Models And Aliases
 

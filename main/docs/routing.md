@@ -22,11 +22,15 @@ Default thresholds:
 
 ```yaml
 routing:
+  history_turns: 12
   thresholds:
     small_prompt_tokens: 2000
     medium_prompt_tokens: 12000
 ```
 
+`history_turns` caps how many recent conversation turns are sent on the next
+request (older turns stay on disk and may be compacted). Lower it to keep
+payloads smaller on long sessions.
 ## Family Discovery
 
 Cntx avoids hardcoded full model lists. It discovers model families from provider responses and model names:

@@ -45,6 +45,69 @@ impl ModelInfo {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Stable prefix messages (identity / memory) may be marked cacheable.
+    pub cacheable: bool,
+}
+
+impl ChatMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            cacheable: false,
+        }
+    }
+
+    pub fn cacheable(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            cacheable: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TokenUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_read_tokens: usize,
+    pub cache_write_tokens: usize,
+}
+
+impl TokenUsage {
+    pub fn merge(&mut self, other: &TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+    }
+
+    pub fn has_provider_counts(&self) -> bool {
+        self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.cache_read_tokens > 0
+            || self.cache_write_tokens > 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeToolCall {
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StreamOutcome {
+    pub tool_calls: Vec<NativeToolCall>,
+    pub usage: TokenUsage,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +119,8 @@ pub struct ChatRequest {
     /// OpenCode Go endpoints. The same conversation keeps the same id across
     /// tools, counsel, retries, and compaction; `/clear` starts a new one.
     pub session_id: Option<String>,
+    /// Native provider tools (OpenAI tools[] / Anthropic tools). Empty = none.
+    pub tools: Vec<ToolSpec>,
 }
 
 #[async_trait]
@@ -67,7 +132,7 @@ pub trait ProviderAdapter: Send + Sync {
         endpoint: &EndpointConfig,
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<()>;
+    ) -> Result<StreamOutcome>;
 }
 
 pub fn adapter_for(provider: ProviderKind) -> Box<dyn ProviderAdapter> {
@@ -96,7 +161,7 @@ pub async fn stream_chat_with_retry(
     endpoint: &EndpointConfig,
     request: ChatRequest,
     on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     let mut backoff = INITIAL_BACKOFF_MS;
     for attempt in 0..=MAX_RETRIES {
         let mut emitted = false;
@@ -109,7 +174,7 @@ pub async fn stream_chat_with_retry(
             _ = crate::interactive::wait_for_interrupt() => Err(anyhow!("provider request interrupted")),
         };
         match result {
-            Ok(()) => return Ok(()),
+            Ok(outcome) => return Ok(outcome),
             Err(e) if !emitted && attempt < MAX_RETRIES && is_retryable_error(&e) => {
                 eprintln!(
                     "  retrying in {}s (attempt {}/{})",
@@ -126,7 +191,7 @@ pub async fn stream_chat_with_retry(
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    Ok(StreamOutcome::default())
 }
 
 /// Returns true when the error looks like a transient provider issue worth
@@ -302,7 +367,7 @@ impl ProviderAdapter for OpenAiLikeAdapter {
         endpoint: &EndpointConfig,
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<()> {
+    ) -> Result<StreamOutcome> {
         let model = normalize_model_for_endpoint(endpoint, &request.model);
         match go_protocol(endpoint, &model) {
             crate::core::GO_PROTOCOL_MESSAGES => {
@@ -324,7 +389,7 @@ async fn stream_chat_completions(
     model: &str,
     request: ChatRequest,
     on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     let messages: Vec<Value> = request
         .messages
         .iter()
@@ -334,9 +399,13 @@ async fn stream_chat_completions(
         "model": model,
         "messages": messages,
         "stream": true,
+        "stream_options": { "include_usage": true },
     });
     if let Some(max_tokens) = request.max_tokens {
         body["max_tokens"] = json!(max_tokens);
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = openai_tools_json(&request.tools);
     }
 
     let request_headers = with_session_header(
@@ -357,6 +426,8 @@ async fn stream_chat_completions(
         .bytes_stream();
 
     let mut pending = Vec::new();
+    let mut tool_acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut usage = TokenUsage::default();
     while let Some(chunk) = stream.next().await {
         pending.extend_from_slice(&chunk?);
         if pending.len() > 1024 * 1024 {
@@ -367,16 +438,21 @@ async fn stream_chat_completions(
                 return;
             }
             if let Ok(value) = serde_json::from_str::<Value>(data) {
+                merge_usage_from_value(&mut usage, &value);
                 if let Some(content) = value
                     .pointer("/choices/0/delta/content")
                     .and_then(Value::as_str)
                 {
                     on_delta(content.to_string());
                 }
+                accumulate_openai_tool_deltas(&mut tool_acc, &value);
             }
         });
     }
-    Ok(())
+    Ok(StreamOutcome {
+        tool_calls: finish_openai_tool_acc(tool_acc),
+        usage,
+    })
 }
 
 /// Anthropic-compatible `/messages` streaming as used by Go's MiniMax and
@@ -387,22 +463,24 @@ async fn stream_messages_compatible(
     model: &str,
     request: ChatRequest,
     on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     let messages: Vec<Value> = request
         .messages
         .iter()
         .filter(|message| message.role != "system")
         .map(|message| json!({ "role": message.role, "content": message.content }))
         .collect();
-    let system = merged_system_text(&request.messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "stream": true,
     });
-    if let Some(system) = system {
-        body["system"] = Value::String(system);
+    if let Some(system) = anthropic_system_blocks(&request.messages, false) {
+        body["system"] = system;
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = anthropic_tools_json(&request.tools, false);
     }
 
     let request_headers = with_session_header(
@@ -423,6 +501,9 @@ async fn stream_messages_compatible(
         .bytes_stream();
 
     let mut pending = Vec::new();
+    let mut usage = TokenUsage::default();
+    let mut tool_acc: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    let mut current_tool_index: Option<usize> = None;
     while let Some(chunk) = stream.next().await {
         pending.extend_from_slice(&chunk?);
         if pending.len() > 1024 * 1024 {
@@ -430,9 +511,7 @@ async fn stream_messages_compatible(
         }
         consume_sse(&mut pending, |data| {
             if let Ok(value) = serde_json::from_str::<Value>(data) {
-                // Anthropic content_block_delta events carry text at
-                // /delta/text; a bare {type:"text", text:...} fallback
-                // covers gateway variants.
+                merge_usage_from_value(&mut usage, &value);
                 if let Some(content) = value.pointer("/delta/text").and_then(Value::as_str) {
                     on_delta(content.to_string());
                 } else if value.get("type").and_then(Value::as_str) == Some("text") {
@@ -440,10 +519,14 @@ async fn stream_messages_compatible(
                         on_delta(content.to_string());
                     }
                 }
+                accumulate_anthropic_tool_deltas(&mut tool_acc, &mut current_tool_index, &value);
             }
         });
     }
-    Ok(())
+    Ok(StreamOutcome {
+        tool_calls: finish_anthropic_tool_acc(tool_acc),
+        usage,
+    })
 }
 
 /// OpenAI Responses `/responses` streaming (GPT/Grok/Muse families on Go).
@@ -453,7 +536,7 @@ async fn stream_responses(
     model: &str,
     request: ChatRequest,
     on_delta: &mut (dyn FnMut(String) + Send),
-) -> Result<()> {
+) -> Result<StreamOutcome> {
     let mut input = Vec::with_capacity(request.messages.len());
     let mut system_parts: Vec<&str> = Vec::new();
     for message in &request.messages {
@@ -480,6 +563,9 @@ async fn stream_responses(
     if let Some(max_tokens) = request.max_tokens {
         body["max_output_tokens"] = json!(max_tokens);
     }
+    if !request.tools.is_empty() {
+        body["tools"] = openai_tools_json(&request.tools);
+    }
 
     let request_headers = with_session_header(
         headers(endpoint, &openai_kind_for(endpoint))?,
@@ -497,6 +583,7 @@ async fn stream_responses(
 
     let mut pending = Vec::new();
     let mut ended = false;
+    let mut usage = TokenUsage::default();
     while let Some(chunk) = stream.next().await {
         pending.extend_from_slice(&chunk?);
         if pending.len() > 1024 * 1024 {
@@ -511,6 +598,7 @@ async fn stream_responses(
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 return;
             };
+            merge_usage_from_value(&mut usage, &value);
             match value.get("type").and_then(Value::as_str) {
                 Some("response.output_text.delta") => {
                     if let Some(delta) = value.get("delta").and_then(Value::as_str) {
@@ -557,7 +645,10 @@ async fn stream_responses(
     if !ended {
         anyhow::bail!("responses stream ended before completion");
     }
-    Ok(())
+    Ok(StreamOutcome {
+        tool_calls: Vec::new(),
+        usage,
+    })
 }
 
 fn openai_kind_for(endpoint: &EndpointConfig) -> ProviderKind {
@@ -571,8 +662,193 @@ fn stringify_value(value: &Value) -> String {
     }
 }
 
+fn openai_tools_json(tools: &[ToolSpec]) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+fn anthropic_tools_json(tools: &[ToolSpec], cache: bool) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .enumerate()
+            .map(|(i, tool)| {
+                let mut entry = json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                });
+                if cache && i + 1 == tools.len() {
+                    entry["cache_control"] = json!({ "type": "ephemeral" });
+                }
+                entry
+            })
+            .collect(),
+    )
+}
+
+fn anthropic_system_blocks(messages: &[ChatMessage], cache: bool) -> Option<Value> {
+    let parts: Vec<&ChatMessage> = messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let blocks: Vec<Value> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, message)| {
+            let mut block = json!({
+                "type": "text",
+                "text": message.content,
+            });
+            if cache && (message.cacheable || i + 1 == parts.len()) {
+                block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            block
+        })
+        .collect();
+    Some(Value::Array(blocks))
+}
+
+fn merge_usage_from_value(usage: &mut TokenUsage, value: &Value) {
+    let node = value
+        .get("usage")
+        .or_else(|| value.pointer("/response/usage"))
+        .or_else(|| value.pointer("/message/usage"));
+    let Some(node) = node else {
+        return;
+    };
+    let read_usize = |keys: &[&str]| -> usize {
+        for key in keys {
+            if let Some(n) = node.get(*key).and_then(Value::as_u64) {
+                return n as usize;
+            }
+        }
+        0
+    };
+    let input = read_usize(&["prompt_tokens", "input_tokens", "prompt_eval_count"]);
+    let output = read_usize(&["completion_tokens", "output_tokens", "eval_count"]);
+    let cache_read = read_usize(&[
+        "cache_read_input_tokens",
+        "prompt_tokens_details.cached_tokens",
+        "cached_tokens",
+    ]);
+    let cache_write = read_usize(&["cache_creation_input_tokens", "cache_write_tokens"]);
+    if let Some(details) = node.get("prompt_tokens_details") {
+        if let Some(n) = details.get("cached_tokens").and_then(Value::as_u64) {
+            usage.cache_read_tokens = usage.cache_read_tokens.max(n as usize);
+        }
+    }
+    if input > 0 {
+        usage.input_tokens = input;
+    }
+    if output > 0 {
+        usage.output_tokens = output;
+    }
+    if cache_read > 0 {
+        usage.cache_read_tokens = cache_read;
+    }
+    if cache_write > 0 {
+        usage.cache_write_tokens = cache_write;
+    }
+}
+
+fn accumulate_openai_tool_deltas(
+    acc: &mut BTreeMap<usize, (String, String, String)>,
+    value: &Value,
+) {
+    let Some(calls) = value
+        .pointer("/choices/0/delta/tool_calls")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for call in calls {
+        let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let entry = acc
+            .entry(index)
+            .or_insert_with(|| (String::new(), String::new(), String::new()));
+        if let Some(id) = call.get("id").and_then(Value::as_str) {
+            entry.0 = id.to_string();
+        }
+        if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+            entry.1.push_str(name);
+        }
+        if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str) {
+            entry.2.push_str(args);
+        }
+    }
+}
+
+fn finish_openai_tool_acc(acc: BTreeMap<usize, (String, String, String)>) -> Vec<NativeToolCall> {
+    acc.into_values()
+        .filter(|(_, name, _)| !name.is_empty())
+        .map(|(_, name, args)| {
+            let arguments = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
+            NativeToolCall { name, arguments }
+        })
+        .collect()
+}
+
+fn accumulate_anthropic_tool_deltas(
+    acc: &mut BTreeMap<usize, (String, String)>,
+    current: &mut Option<usize>,
+    value: &Value,
+) {
+    match value.get("type").and_then(Value::as_str) {
+        Some("content_block_start") => {
+            if value.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") {
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let name = value
+                    .pointer("/content_block/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                acc.insert(index, (name, String::new()));
+                *current = Some(index);
+            }
+        }
+        Some("content_block_delta") => {
+            if let Some(partial) = value.pointer("/delta/partial_json").and_then(Value::as_str) {
+                if let Some(index) = current {
+                    if let Some(entry) = acc.get_mut(index) {
+                        entry.1.push_str(partial);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn finish_anthropic_tool_acc(acc: BTreeMap<usize, (String, String)>) -> Vec<NativeToolCall> {
+    acc.into_values()
+        .filter(|(name, _)| !name.is_empty())
+        .map(|(name, args)| {
+            let arguments = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
+            NativeToolCall { name, arguments }
+        })
+        .collect()
+}
+
 /// Merge every system message instead of dropping extra ones so skills,
 /// summaries, and goal instructions all reach Anthropic-compatible models.
+#[allow(dead_code)]
 fn merged_system_text(messages: &[ChatMessage]) -> Option<String> {
     let parts: Vec<&str> = messages
         .iter()
@@ -611,24 +887,24 @@ impl ProviderAdapter for AnthropicAdapter {
         endpoint: &EndpointConfig,
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<()> {
+    ) -> Result<StreamOutcome> {
         let messages: Vec<Value> = request
             .messages
             .iter()
             .filter(|message| message.role != "system")
             .map(|message| json!({ "role": message.role, "content": message.content }))
             .collect();
-        // Merge ALL system messages: base instructions, skills, summaries,
-        // and goal instructions must all reach the model.
-        let system = merged_system_text(&request.messages);
         let mut body = json!({
             "model": request.model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
             "stream": true,
         });
-        if let Some(system) = system {
-            body["system"] = Value::String(system);
+        if let Some(system) = anthropic_system_blocks(&request.messages, true) {
+            body["system"] = system;
+        }
+        if !request.tools.is_empty() {
+            body["tools"] = anthropic_tools_json(&request.tools, true);
         }
 
         let mut stream = client(endpoint)?
@@ -644,6 +920,9 @@ impl ProviderAdapter for AnthropicAdapter {
             .bytes_stream();
 
         let mut pending = Vec::new();
+        let mut usage = TokenUsage::default();
+        let mut tool_acc: BTreeMap<usize, (String, String)> = BTreeMap::new();
+        let mut current_tool_index: Option<usize> = None;
         while let Some(chunk) = stream.next().await {
             pending.extend_from_slice(&chunk?);
             if pending.len() > 1024 * 1024 {
@@ -651,13 +930,22 @@ impl ProviderAdapter for AnthropicAdapter {
             }
             consume_sse(&mut pending, |data| {
                 if let Ok(value) = serde_json::from_str::<Value>(data) {
+                    merge_usage_from_value(&mut usage, &value);
                     if let Some(content) = value.pointer("/delta/text").and_then(Value::as_str) {
                         on_delta(content.to_string());
                     }
+                    accumulate_anthropic_tool_deltas(
+                        &mut tool_acc,
+                        &mut current_tool_index,
+                        &value,
+                    );
                 }
             });
         }
-        Ok(())
+        Ok(StreamOutcome {
+            tool_calls: finish_anthropic_tool_acc(tool_acc),
+            usage,
+        })
     }
 }
 
@@ -699,7 +987,7 @@ impl ProviderAdapter for OllamaAdapter {
         endpoint: &EndpointConfig,
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
-    ) -> Result<()> {
+    ) -> Result<StreamOutcome> {
         let provider = if self.cloud {
             ProviderKind::OllamaCloud
         } else {
@@ -718,6 +1006,9 @@ impl ProviderAdapter for OllamaAdapter {
         if let Some(max_tokens) = request.max_tokens {
             body["options"] = json!({ "num_predict": max_tokens });
         }
+        if !request.tools.is_empty() {
+            body["tools"] = openai_tools_json(&request.tools);
+        }
 
         let mut stream = client(endpoint)?
             .post(join_url(
@@ -732,6 +1023,7 @@ impl ProviderAdapter for OllamaAdapter {
             .bytes_stream();
 
         let mut pending = Vec::new();
+        let mut usage = TokenUsage::default();
         while let Some(chunk) = stream.next().await {
             pending.extend_from_slice(&chunk?);
             if pending.len() > 1024 * 1024 {
@@ -739,6 +1031,7 @@ impl ProviderAdapter for OllamaAdapter {
             }
             consume_lines(&mut pending, |line| {
                 if let Ok(value) = serde_json::from_str::<Value>(line) {
+                    merge_usage_from_value(&mut usage, &value);
                     if let Some(content) = value.pointer("/message/content").and_then(Value::as_str)
                     {
                         on_delta(content.to_string());
@@ -746,7 +1039,10 @@ impl ProviderAdapter for OllamaAdapter {
                 }
             });
         }
-        Ok(())
+        Ok(StreamOutcome {
+            tool_calls: Vec::new(),
+            usage,
+        })
     }
 }
 

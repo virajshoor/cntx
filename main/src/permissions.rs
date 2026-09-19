@@ -26,6 +26,9 @@ pub enum Mode {
     #[serde(rename = "manual-approve", alias = "request-permission")]
     RequestPermission,
     FileOnly,
+    #[value(name = "plan")]
+    #[serde(rename = "plan")]
+    Plan,
 }
 
 impl Mode {
@@ -37,6 +40,7 @@ impl Mode {
             Self::Allow => crate::core::MODE_ALL_APPROVE,
             Self::RequestPermission => crate::core::MODE_MANUAL_APPROVE,
             Self::FileOnly => crate::core::MODE_FILE_ONLY,
+            Self::Plan => crate::core::MODE_PLAN,
         }
     }
 
@@ -47,6 +51,7 @@ impl Mode {
             crate::core::MODE_ALL_APPROVE => Some(Self::Allow),
             crate::core::MODE_MANUAL_APPROVE => Some(Self::RequestPermission),
             crate::core::MODE_FILE_ONLY => Some(Self::FileOnly),
+            crate::core::MODE_PLAN => Some(Self::Plan),
             _ => None,
         }
     }
@@ -185,6 +190,7 @@ mod tests {
         assert_eq!(Mode::RequestPermission.as_str(), "manual-approve");
         assert_eq!(Mode::Counsel.as_str(), "counsel");
         assert_eq!(Mode::FileOnly.as_str(), "file-only");
+        assert_eq!(Mode::Plan.as_str(), "plan");
     }
 
     #[test]
@@ -204,7 +210,8 @@ mod tests {
     fn cycle_matches_contract() {
         assert_eq!(Mode::Auto.next(), Mode::Allow);
         assert_eq!(Mode::Allow.next(), Mode::RequestPermission);
-        assert_eq!(Mode::RequestPermission.next(), Mode::Auto);
+        assert_eq!(Mode::RequestPermission.next(), Mode::Plan);
+        assert_eq!(Mode::Plan.next(), Mode::Auto);
         assert_eq!(Mode::Counsel.next(), Mode::Auto);
         assert_eq!(Mode::FileOnly.next(), Mode::Auto);
     }
@@ -219,5 +226,9 @@ mod tests {
         assert_eq!(policy.decide(Operation::Shell), PermissionDecision::Ask);
         let file_only = PermissionPolicy::new(Mode::FileOnly);
         assert_eq!(file_only.decide(Operation::Shell), PermissionDecision::Deny);
+        let plan = PermissionPolicy::new(Mode::Plan);
+        assert_eq!(plan.decide(Operation::ReadFile), PermissionDecision::Allow);
+        assert_eq!(plan.decide(Operation::WriteFile), PermissionDecision::Deny);
+        assert_eq!(plan.decide(Operation::Shell), PermissionDecision::Deny);
     }
 }

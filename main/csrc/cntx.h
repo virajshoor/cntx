@@ -55,7 +55,8 @@ typedef enum cntx_mode {
     CNTX_MODE_COUNSEL = 1,      /* counsel evaluation; same policy as auto */
     CNTX_MODE_ALL_APPROVE = 2,  /* permitted tools run without prompting */
     CNTX_MODE_MANUAL_APPROVE = 3, /* every tool asks first */
-    CNTX_MODE_FILE_ONLY = 4     /* files ok; shell/network denied */
+    CNTX_MODE_FILE_ONLY = 4,    /* files ok; shell/network denied */
+    CNTX_MODE_PLAN = 5          /* read/glob/grep only; deny write/edit/bash */
 } cntx_mode_t;
 
 typedef enum cntx_operation {

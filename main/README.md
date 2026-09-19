@@ -20,10 +20,14 @@ and keep context across turns.
 - Sessions persist tool results, decisions, and goal state; `/compact`
   summarizes older turns without changing the session id; `/goal` runs bounded,
   resumable, goal-oriented work.
+- Tool calls use provider-native `tools[]` where supported, with a slim system
+  prompt and packed tool results so large bash/grep output does not grow the
+  next request linearly. `/usage` shows provider input/output/cache tokens when
+  the stream reports them; `/cost` remains for session totals.
 - OpenCode Go works as a first-class subscription provider.
 - API keys live in a gitignored runtime store that auto-creates on first boot.
 - Auto mode chooses a model based on optimized prompt size; counsel mode keeps
-  multi-model evaluation bounded.
+  multi-model evaluation bounded; `plan` mode is read-only until you switch.
 
 ## Install
 
@@ -101,14 +105,16 @@ compacted 14 messages (session 7f3c... unchanged)
 
 ## Approval modes
 
-| Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel |
-| --- | --- | --- | --- | --- | --- |
-| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow || In-root write/edit | Allow | Allow | Ask | Allow | Allow |
-| Shell command | Ask | Allow | Ask | Deny | Ask |
-| Outside-root write | Deny | Deny | Deny | Deny | Deny |
+| Operation | auto-approve (default) | all-approve | manual-approve | file-only | counsel | plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| Explicit read/glob/grep | Allow | Allow | Ask | Allow | Allow | Allow |
+| In-root write/edit | Allow | Allow | Ask | Allow | Allow | Deny |
+| Shell command | Ask | Allow | Ask | Deny | Ask | Deny |
+| Outside-root write | Deny | Deny | Deny | Deny | Deny | Deny |
 
 `--mode all-approve` executes permitted tools without prompts; file containment
-still applies. `--dry-run` blocks mutations and shell execution.
+still applies. `--mode plan` is read-only exploration until you switch.
+`--dry-run` blocks mutations and shell execution.
 [docs/modes.md](docs/modes.md) has full semantics.
 
 ## Documentation
@@ -156,10 +162,11 @@ sh scripts/verify.sh   # C sanitizer tests + package checks + temp-root install
 
 ## Known limitations
 
-- Models call tools through a text `<tool>{...}</tool>` protocol, not
-  provider-native tool-call APIs.
-- Token counts are estimates, not provider tokenizers.
-- MCP servers run on demand (`cntx mcp tools <name>`), not automatically.
+- Token counts prefer provider usage from the stream when present; otherwise
+  they fall back to heuristics (not provider tokenizers).
+- Built-in MCP servers (Context7, Headroom) are inspected with `cntx mcp tools`
+  and are not injected into every request; enabled custom MCP servers are
+  exposed once per session as `mcp__<server>__<tool>`.
 - OpenCode Go protocol handling is verified against a local HTTP mock, not an
   authenticated live subscription.
 - Windows is not supported.

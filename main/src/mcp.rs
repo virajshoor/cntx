@@ -243,6 +243,35 @@ pub async fn print_tools(config: &AppConfig, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// List tools from enabled non-built-in MCP servers once for a session.
+/// Built-ins (Context7, Headroom) stay available via `cntx mcp`, not tools[].
+pub async fn session_mcp_tools(
+    config: &AppConfig,
+) -> Result<(Vec<crate::providers::ToolSpec>, Vec<McpServerConfig>)> {
+    let mut specs = Vec::new();
+    let mut servers = Vec::new();
+    for server in enabled_servers(config) {
+        if server.built_in {
+            continue;
+        }
+        let mut client = McpClient::spawn(server)?;
+        let _ = client.initialize().await?;
+        let tools = client.list_tools().await?;
+        client.shutdown().await;
+        for tool in tools {
+            specs.push(crate::providers::ToolSpec {
+                name: format!("mcp__{}__{}", server.name, tool.name),
+                description: tool
+                    .description
+                    .unwrap_or_else(|| format!("MCP {}.{}", server.name, tool.name)),
+                input_schema: tool.input_schema,
+            });
+        }
+        servers.push(server.clone());
+    }
+    Ok((specs, servers))
+}
+
 /// Default env hints for the built-in servers, used to document setup.
 pub fn builtin_env_hints() -> BTreeMap<String, String> {
     let mut hints = BTreeMap::new();

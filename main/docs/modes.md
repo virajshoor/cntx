@@ -5,9 +5,10 @@ Cntx Code includes an extensible permission policy. Modes work together with the
 the mode decides when to ask for writes, shell, and network access.
 
 Canonical names are `auto-approve`, `all-approve`, `manual-approve`, `counsel`,
-and `file-only`. The legacy names `auto`, `allow`, and `request-permission`
-remain accepted aliases, and existing configuration files keep loading. The
-default mode is `auto-approve` in both interactive and one-shot use.
+`file-only`, and `plan`. The legacy names `auto`, `allow`, and
+`request-permission` remain accepted aliases, and existing configuration files
+keep loading. The default mode is `auto-approve` in both interactive and
+one-shot use.
 
 ## Decision table
 
@@ -16,17 +17,16 @@ write file "notes.txt"") and continues only after `y`/`yes`. It never means
 allow silently. Declining produces a tool error without side effects and is
 never retried through a different tool.
 
-| Operation | auto-approve | all-approve | manual-approve | file-only | counsel |
-| --- | --- | --- | --- | --- | --- |
-| Explicit read/glob/grep tool | Allow | Allow | Ask | Allow | Allow |
-| In-root write/edit/apply | Allow | Allow | Ask | Allow | Allow |
-| Shell command | Ask | Allow | Ask | Deny | Ask |
-| Outside-root direct write | Deny | Deny | Deny | Deny | Deny |
+| Operation | auto-approve | all-approve | manual-approve | file-only | counsel | plan |
+| --- | --- | --- | --- | --- | --- | --- |
+| Explicit read/glob/grep tool | Allow | Allow | Ask | Allow | Allow | Allow |
+| In-root write/edit/apply | Allow | Allow | Ask | Allow | Allow | Deny |
+| Shell command | Ask | Allow | Ask | Deny | Ask | Deny |
+| Outside-root direct write | Deny | Deny | Deny | Deny | Deny | Deny |
 
 Writing code inside the sandbox is the core action, so auto-approve does it
 without prompting; only shell commands still ask, with a prompt offering
-`y` (allow once), `ya` (allow commands for the rest of the session), or
-`n` (decline).
+`y` (allow once), `ya` (allow commands for the session), or `n` (decline).
 
 Outside-root writes become eligible only with `--allow-write <root>` or the
 explicit `--dangerously-disable-sandbox` flag; their approval decision then
@@ -52,6 +52,12 @@ its contents are read and sent.
 
 Allows file reads and writes but denies shell and network tools.
 
+## plan
+
+Read-only exploration: allows `read`, `glob`, and `grep`; denies `write`,
+`edit`, and `bash`. Switch to `auto-approve` (or another write-capable mode)
+before mutations. Use `/mode plan` in the interactive shell.
+
 ## counsel
 
 Uses a token-efficient mix of models:
@@ -69,13 +75,14 @@ use the same model. Approval behavior matches auto-approve.
 
 ```bash
 cntx --mode all-approve "run the test suite and fix what fails"
+cntx --mode plan "map where auth is defined"
 cntx --mode manual-approve "show me exactly what you would change"
 ```
 
-- `/mode` prints the current mode and the five available modes.
+- `/mode` prints the current mode and the available modes.
 - `/mode <name>` validates first; invalid input changes nothing. Applies to
   this session and updates runtime and sandbox policy together.
-- Shift+Tab cycles `auto-approve → all-approve → manual-approve →
+- Shift+Tab cycles `auto-approve → all-approve → manual-approve → plan →
   auto-approve` (legacy extra modes return to auto-approve) and preserves the
   current input draft.
 

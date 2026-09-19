@@ -28,6 +28,9 @@ documented in [Providers](providers.md) and [MCP](mcp.md).
   because `config.yaml` is easier to copy around.
 - Reads, grep, and glob refuse known secret/credential filenames so the model
   cannot pull credentials through a differently-named path.
+- Before a request leaves the machine, content that looks like API keys,
+  bearer tokens, or private key blocks is redacted from the assembled prompt
+  and tool results.
 - There is no vault/KMS integration, rotation, or expiry. Rotate at the
   provider and re-add.
 
@@ -39,7 +42,8 @@ documented in [Providers](providers.md) and [MCP](mcp.md).
 - Approval modes decide when a human is asked: `auto-approve` writes code
   freely and asks before shell commands (`y` once, `ya` for the session,
   `n` declines), `all-approve` runs permitted tools without prompting,
-  `manual-approve` asks before everything, `file-only` denies shell/network.
+  `manual-approve` asks before everything, `file-only` denies shell/network,
+  `plan` allows only `read` / `glob` / `grep` until you switch modes.
 - An approved shell command runs with your user privileges and can reach the
   wider machine, like any command you type yourself.
   `--dangerously-disable-sandbox` removes containment entirely; never use it

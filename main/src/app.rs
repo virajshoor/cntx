@@ -132,6 +132,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     dry_run: cli.dry_run,
                     sandbox,
                     tool_use,
+                    jsonl: cli.jsonl,
                 },
             )?;
             if !prompt.trim().is_empty() {
@@ -161,6 +162,8 @@ pub struct Runtime {
     pub active_skill: Option<crate::skills::Skill>,
     /// Running cost estimate for the current session (USD cents).
     pub cost_tracker: CostTracker,
+    /// Emit one JSONL object per turn when set (headless/CI).
+    pub jsonl: bool,
     /// Why the active goal paused: declined step, blocker, or stall.
     pub goal_pause_reason: Option<String>,
     /// Consecutive goal turns with no tool action or progress update.
@@ -169,12 +172,16 @@ pub struct Runtime {
     pub turn_had_action: bool,
 }
 
-/// Tracks estimated token usage and cost for a session.
+/// Tracks estimated and provider token usage for a session.
 #[derive(Clone, Debug, Default)]
 pub struct CostTracker {
     pub input_tokens: usize,
     pub output_tokens: usize,
+    pub cache_read_tokens: usize,
+    pub cache_write_tokens: usize,
     pub request_count: usize,
+    pub last_turn: crate::providers::TokenUsage,
+    pub provider_reported: bool,
 }
 
 impl CostTracker {
@@ -182,13 +189,32 @@ impl CostTracker {
         self.input_tokens += input;
         self.output_tokens += output;
         self.request_count += 1;
+        self.last_turn = crate::providers::TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        };
+    }
+
+    pub fn add_usage(&mut self, usage: &crate::providers::TokenUsage) {
+        if usage.has_provider_counts() {
+            self.provider_reported = true;
+            self.input_tokens += usage.input_tokens;
+            self.output_tokens += usage.output_tokens;
+            self.cache_read_tokens += usage.cache_read_tokens;
+            self.cache_write_tokens += usage.cache_write_tokens;
+            self.request_count += 1;
+            self.last_turn = usage.clone();
+        }
     }
 
     pub fn estimated_cost_usd(&self) -> f64 {
-        // Rough blended rate: $3/M input, $15/M output (weighted average)
+        // Rough blended rate; cache reads billed lower when present.
         let input_cost = self.input_tokens as f64 * 3.0 / 1_000_000.0;
         let output_cost = self.output_tokens as f64 * 15.0 / 1_000_000.0;
-        input_cost + output_cost
+        let cache_cost = self.cache_read_tokens as f64 * 0.3 / 1_000_000.0
+            + self.cache_write_tokens as f64 * 3.75 / 1_000_000.0;
+        input_cost + output_cost + cache_cost
     }
 }
 
@@ -201,6 +227,7 @@ pub struct RuntimeOptions {
     pub dry_run: bool,
     pub sandbox: Sandbox,
     pub tool_use: bool,
+    pub jsonl: bool,
 }
 
 impl Runtime {
@@ -222,6 +249,7 @@ impl Runtime {
             last_apply_outcomes: Vec::new(),
             active_skill: None,
             cost_tracker: CostTracker::default(),
+            jsonl: options.jsonl,
             goal_pause_reason: None,
             goal_stall: 0,
             turn_had_action: false,
@@ -297,6 +325,9 @@ impl Runtime {
             let skill_prompt = self.active_skill.as_ref().map(|s| s.prompt.clone());
             self.session.push("user", prompt);
             self.save_session()?;
+            let (mcp_tools, mcp_servers) = crate::mcp::session_mcp_tools(&self.config)
+                .await
+                .unwrap_or_default();
             let assistant_text = crate::tools::run_tool_loop(
                 &optimized.text,
                 &self.sandbox,
@@ -309,6 +340,16 @@ impl Runtime {
                     effort: self.effort,
                     goal: self.goal_prompt_state(),
                     session_id: Some(self.session.id.clone()),
+                    cacheable_project: crate::context::cacheable_project_prefix(
+                        self.sandbox.project_root(),
+                    ),
+                    mcp_tools,
+                    artifacts_dir: Some(
+                        self.store
+                            .sessions_dir()
+                            .join(format!("{}.artifacts", self.session.id)),
+                    ),
+                    mcp_servers,
                 },
                 &mut LoopHost {
                     budget: self.request_budget(&endpoint_name, &model)?,
@@ -319,6 +360,8 @@ impl Runtime {
                     had_action: &mut self.turn_had_action,
                     dry_run: self.dry_run,
                     approve_commands_for_session: false,
+                    cost_tracker: &mut self.cost_tracker,
+                    jsonl: self.jsonl,
                 },
             )
             .await;
@@ -331,8 +374,24 @@ impl Runtime {
                 }
             };
             self.track_cost(optimized.report.estimated_tokens, &assistant_text);
-            ui::print_markdown(&assistant_text);
-            println!();
+            if self.jsonl {
+                let line = serde_json::json!({
+                    "type": "turn",
+                    "model": model,
+                    "tools": crate::tools::tool_definitions().iter().map(|t| t.name).collect::<Vec<_>>(),
+                    "stop_reason": "completed",
+                    "usage": {
+                        "input_tokens": self.cost_tracker.last_turn.input_tokens,
+                        "output_tokens": self.cost_tracker.last_turn.output_tokens,
+                        "cache_read_tokens": self.cost_tracker.last_turn.cache_read_tokens,
+                        "cache_write_tokens": self.cost_tracker.last_turn.cache_write_tokens,
+                    }
+                });
+                println!("{line}");
+            } else {
+                ui::print_markdown(&assistant_text);
+                println!();
+            }
 
             self.session.push("assistant", assistant_text.clone());
             self.save_session()?;
@@ -358,11 +417,13 @@ impl Runtime {
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_prompt(self.effort),
+            cacheable: false,
         });
         if self.apply {
             messages.push(ChatMessage {
                 role: "system".to_string(),
                 content: crate::apply::APPLY_SYSTEM_INSTRUCTION.to_string(),
+                cacheable: false,
             });
         }
         // Inject the active skill's prompt as a system message so the model
@@ -371,22 +432,24 @@ impl Runtime {
             messages.push(ChatMessage {
                 role: "system".to_string(),
                 content: skill.prompt.clone(),
+                cacheable: false,
             });
         }
-        // Inject prior session turns so multi-turn conversation context is
-        // preserved. The number of turns is bounded by config.routing.history_turns.
+        // Inject prior session turns (bounded by routing.history_turns).
         for msg in self.session_history_messages() {
             messages.push(msg);
         }
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: optimized.text.clone(),
+            cacheable: false,
         });
         let request = ChatRequest {
             model,
             messages,
             max_tokens: Some(4096),
             session_id: Some(self.session.id.clone()),
+            tools: Vec::new(),
         };
         validate_chat_request(&request)?;
 
@@ -418,11 +481,16 @@ impl Runtime {
             had_action: &mut self.turn_had_action,
             dry_run: self.dry_run,
             approve_commands_for_session: false,
+            cost_tracker: &mut self.cost_tracker,
+            jsonl: self.jsonl,
         }
         .before_request()
     }
 
     fn track_cost(&mut self, input_tokens: usize, output_text: &str) {
+        if self.cost_tracker.provider_reported {
+            return;
+        }
         self.cost_tracker
             .add(input_tokens, estimate_output_tokens(output_text));
     }
@@ -468,7 +536,7 @@ impl Runtime {
     /// Run a chat request, showing a live preview of streamed tokens while the
     /// model generates. Returns the full assistant text.
     pub async fn generate(
-        &self,
+        &mut self,
         endpoint: &EndpointConfig,
         request: ChatRequest,
     ) -> Result<String> {
@@ -496,7 +564,22 @@ impl Runtime {
             );
             return Ok(assistant_text);
         }
-        result?;
+        let outcome = result?;
+        self.cost_tracker.add_usage(&outcome.usage);
+        if self.jsonl {
+            let line = serde_json::json!({
+                "type": "turn",
+                "model": endpoint.default_model,
+                "stop_reason": "completed",
+                "usage": {
+                    "input_tokens": outcome.usage.input_tokens,
+                    "output_tokens": outcome.usage.output_tokens,
+                    "cache_read_tokens": outcome.usage.cache_read_tokens,
+                    "cache_write_tokens": outcome.usage.cache_write_tokens,
+                }
+            });
+            println!("{line}");
+        }
         Ok(assistant_text)
     }
 
@@ -550,9 +633,11 @@ impl Runtime {
                 messages: vec![ChatMessage {
                     role: "user".to_string(),
                     content: evaluation_prompt,
+                    cacheable: false,
                 }],
                 max_tokens: Some(512),
                 session_id: Some(self.session.id.clone()),
+                tools: Vec::new(),
             },
         )
         .await?;
@@ -598,12 +683,14 @@ impl Runtime {
             messages.push(ChatMessage {
                 role: "user".to_string(),
                 content: worker_prompt.to_string(),
+                cacheable: false,
             });
             let request = ChatRequest {
                 model: worker_model.to_string(),
                 messages,
                 max_tokens: Some(4096),
                 session_id: Some(self.session.id.clone()),
+                tools: Vec::new(),
             };
             validate_chat_request(&request)?;
             return self.generate(endpoint, request).await;
@@ -626,6 +713,16 @@ impl Runtime {
                 effort: self.effort,
                 goal,
                 session_id: Some(session_id),
+                cacheable_project: crate::context::cacheable_project_prefix(
+                    self.sandbox.project_root(),
+                ),
+                mcp_tools: Vec::new(),
+                artifacts_dir: Some(
+                    self.store
+                        .sessions_dir()
+                        .join(format!("{}.artifacts", self.session.id)),
+                ),
+                mcp_servers: Vec::new(),
             },
             &mut LoopHost {
                 budget: self.request_budget(&endpoint.name, worker_model)?,
@@ -636,6 +733,8 @@ impl Runtime {
                 had_action: &mut self.turn_had_action,
                 dry_run: self.dry_run,
                 approve_commands_for_session: false,
+                cost_tracker: &mut self.cost_tracker,
+                jsonl: self.jsonl,
             },
         )
         .await
@@ -676,7 +775,7 @@ impl Runtime {
     /// summaries visible so compaction stays continuous, and maps stored
     /// tool results onto user-role messages for the provider.
     fn session_history_messages(&self) -> Vec<ChatMessage> {
-        crate::context::session_history(&self.session)
+        crate::context::session_history(&self.session, self.config.routing.history_turns)
     }
 
     pub async fn compact_session(&mut self) -> Result<String> {
@@ -1115,6 +1214,8 @@ struct LoopHost<'a> {
     dry_run: bool,
     goal_running: bool,
     budget: usize,
+    cost_tracker: &'a mut CostTracker,
+    jsonl: bool,
     /// Set when the user answers "ya" to a command prompt: later shell
     /// commands run for the rest of the session without re-prompting.
     approve_commands_for_session: bool,
@@ -1124,6 +1225,20 @@ struct LoopHost<'a> {
 impl crate::tools::ToolHost for LoopHost<'_> {
     fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    fn record_usage(&mut self, usage: &crate::providers::TokenUsage) {
+        self.cost_tracker.add_usage(usage);
+        if self.jsonl && usage.has_provider_counts() {
+            let line = serde_json::json!({
+                "type": "usage",
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_write_tokens": usage.cache_write_tokens,
+            });
+            println!("{line}");
+        }
     }
 
     fn approve(&mut self, action: &str) -> crate::permissions::ApprovalChoice {
@@ -1244,7 +1359,7 @@ impl crate::tools::ToolHost for LoopHost<'_> {
         request: &mut ChatRequest,
     ) -> Result<()> {
         if crate::context::messages_tokens(&request.messages) > self.budget {
-            let old_history = crate::context::session_history(self.session).len();
+            let old_history = crate::context::session_history(self.session, usize::MAX / 4).len();
             let prefix = request
                 .messages
                 .len()
@@ -1270,6 +1385,7 @@ impl crate::tools::ToolHost for LoopHost<'_> {
                     ChatMessage {
                         role: "system".into(),
                         content: format!("Previous conversation summary:\n{summary}"),
+                        cacheable: false,
                     },
                 );
             }
@@ -1643,6 +1759,7 @@ async fn handle_model(
                     dry_run: false,
                     sandbox,
                     tool_use: false,
+                    jsonl: false,
                 },
             )?
             .print_models()
@@ -1714,6 +1831,7 @@ async fn handle_session(command: SessionCommand, store: &ConfigStore) -> Result<
                     dry_run: false,
                     sandbox,
                     tool_use: true,
+                    jsonl: false,
                 },
             )?;
             if let Some(session_root) = session.workspace_root.as_ref() {

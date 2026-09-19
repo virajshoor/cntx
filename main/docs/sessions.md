@@ -62,4 +62,7 @@ session is preserved — requests are never sent oversized.
 
 New turns can reference earlier file changes and command results because tool
 results stay in the conversation history, bounded by `routing.history_turns`
-and the context budget.
+and the context budget. Oversized tool output is packed for the model (hash +
+on-disk artifact pointer) so later turns stay lean while the full result
+remains available locally. `/usage` reports last-turn and session provider
+usage when the stream includes it; `/cost` remains the session estimate.

@@ -254,7 +254,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/help` - show this help\n\
 - `/status` - show endpoint, model, mode, sandbox, and apply state\n\
 - `/mode` - show the current approval mode\n\
-- `/mode <name>` - switch modes for this session: auto-approve, all-approve, manual-approve, counsel, file-only\n\
+- `/mode <name>` - switch modes for this session: auto-approve, all-approve, manual-approve, counsel, file-only, plan\n\
 - `/model` - show the effective endpoint and model\n\
 - `/model <id-or-alias>` - switch the model for this session (`/model auto` restores automatic selection)\n\
 - `/models` - list cached models grouped by endpoint\n\
@@ -267,6 +267,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
 - `/clear` - save the old session and start a fresh one\n\
 - `/compact` - summarize the conversation so far; the session id stays the same\n\
 - `/cost` - show estimated token usage and cost for this session\n\
+- `/usage` - show last-turn and session provider usage (input/output/cache)\n\
 - `/endpoints` - list endpoints\n\
 - `/skills` - list skills\n\
 - `/skill <name>` - activate a skill so its prompt is injected into each request\n\
@@ -301,7 +302,7 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
                         );
                     }
                     None => println!(
-                        "invalid mode '{name}'; use auto-approve, all-approve, manual-approve, counsel, or file-only"
+                        "invalid mode '{name}'; use auto-approve, all-approve, manual-approve, counsel, file-only, or plan"
                     ),
                 }
             } else {
@@ -310,7 +311,9 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
                     runtime.mode.as_str(),
                     runtime.mode.description()
                 );
-                println!("modes: auto-approve, all-approve, manual-approve, counsel, file-only");
+                println!(
+                    "modes: auto-approve, all-approve, manual-approve, counsel, file-only, plan"
+                );
             }
             Ok(false)
         }
@@ -440,6 +443,32 @@ async fn handle_slash(runtime: &mut Runtime, input: &str) -> Result<bool> {
             println!("output tokens: {}", ct.output_tokens);
             println!("total tokens:  {}", ct.input_tokens + ct.output_tokens);
             println!("est. cost:    ${:.4}", ct.estimated_cost_usd());
+            Ok(false)
+        }
+        Some("/usage") => {
+            let ct = &runtime.cost_tracker;
+            let source = if ct.provider_reported {
+                "provider"
+            } else {
+                "estimate"
+            };
+            println!("source: {source}");
+            println!(
+                "last turn: in={} out={} cache_read={} cache_write={}",
+                ct.last_turn.input_tokens,
+                ct.last_turn.output_tokens,
+                ct.last_turn.cache_read_tokens,
+                ct.last_turn.cache_write_tokens
+            );
+            println!(
+                "session:   in={} out={} cache_read={} cache_write={} requests={}",
+                ct.input_tokens,
+                ct.output_tokens,
+                ct.cache_read_tokens,
+                ct.cache_write_tokens,
+                ct.request_count
+            );
+            println!("est. cost: ${:.4}", ct.estimated_cost_usd());
             Ok(false)
         }
         Some("/models") => {

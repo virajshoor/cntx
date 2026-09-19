@@ -56,3 +56,4 @@ uuid = { version = "1", features = ["serde", "v4"] }
 wait-timeout = "0.2"
 
 tempfile = "3"
+sha2 = "0.10"

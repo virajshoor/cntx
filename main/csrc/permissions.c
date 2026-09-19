@@ -5,22 +5,18 @@
 
 #include <string.h>
 
-/* The exact decision table from the product contract:
+/* Decision table:
  *
- * | Operation                    | auto | all | manual | file-only | counsel |
- * | Explicit read/glob/grep tool | Allow| Allow| Ask   | Allow     | Allow   |
- * | In-root write/edit/apply     | Allow| Allow| Ask   | Allow     | Allow   |
- * | Shell command                | Ask  | Allow| Ask   | Deny      | Ask     |
- * | Outside-root direct write    | Deny | Deny | Deny  | Deny      | Deny    |
+ * | Operation                    | auto | all | manual | file-only | counsel | plan |
+ * | Explicit read/glob/grep tool | Allow| Allow| Ask   | Allow     | Allow   | Allow|
+ * | In-root write/edit/apply     | Allow| Allow| Ask   | Allow     | Allow   | Deny |
+ * | Shell command                | Ask  | Allow| Ask   | Deny      | Ask     | Deny |
+ * | Outside-root direct write    | Deny | Deny | Deny  | Deny      | Deny    | Deny |
  *
- * Outside-root denial is layered on top of the mode decision by the sandbox
- * (containment check in Rust); this table only expresses the mode policy.
- * Writing code inside the sandbox is the product's core action, so
- * auto-approve allows it; only shell commands still ask (with
- * once/always/no choices).
+ * Outside-root denial is layered on top by the sandbox (Rust containment).
  */
 cntx_decision_t cntx_permission_decide(int mode, int operation) {
-    if (mode < CNTX_MODE_AUTO_APPROVE || mode > CNTX_MODE_FILE_ONLY ||
+    if (mode < CNTX_MODE_AUTO_APPROVE || mode > CNTX_MODE_PLAN ||
         operation < CNTX_OP_READ || operation > CNTX_OP_NETWORK) {
         return CNTX_DECISION_DENY;
     }
@@ -35,7 +31,14 @@ cntx_decision_t cntx_permission_decide(int mode, int operation) {
         case CNTX_OP_READ:
         case CNTX_OP_WRITE:
             return CNTX_DECISION_ALLOW;
-        default: /* shell, network */
+        default:
+            return CNTX_DECISION_DENY;
+        }
+    case CNTX_MODE_PLAN:
+        switch (operation) {
+        case CNTX_OP_READ:
+            return CNTX_DECISION_ALLOW;
+        default: /* write, shell, network */
             return CNTX_DECISION_DENY;
         }
     case CNTX_MODE_AUTO_APPROVE:
@@ -45,7 +48,7 @@ cntx_decision_t cntx_permission_decide(int mode, int operation) {
         case CNTX_OP_READ:
         case CNTX_OP_WRITE:
             return CNTX_DECISION_ALLOW;
-        default: /* shell, network */
+        default:
             return CNTX_DECISION_ASK;
         }
     }
@@ -63,6 +66,8 @@ const char *cntx_mode_canonical_name(int mode) {
         return "manual-approve";
     case CNTX_MODE_FILE_ONLY:
         return "file-only";
+    case CNTX_MODE_PLAN:
+        return "plan";
     default:
         return NULL;
     }
@@ -80,6 +85,8 @@ const char *cntx_mode_description(int mode) {
         return "ask before every tool, file, or shell operation";
     case CNTX_MODE_FILE_ONLY:
         return "allow file reads/writes, but block shell and network";
+    case CNTX_MODE_PLAN:
+        return "read-only: allow read/glob/grep; deny write, edit, and bash until you switch modes";
     default:
         return NULL;
     }
@@ -100,6 +107,8 @@ int cntx_mode_parse(const char *name, int *out_mode) {
         *out_mode = CNTX_MODE_MANUAL_APPROVE;
     } else if (strcmp(name, "file-only") == 0) {
         *out_mode = CNTX_MODE_FILE_ONLY;
+    } else if (strcmp(name, "plan") == 0) {
+        *out_mode = CNTX_MODE_PLAN;
     } else {
         return CNTX_ERR_NOT_FOUND;
     }
@@ -113,8 +122,9 @@ int cntx_mode_next(int mode) {
     case CNTX_MODE_ALL_APPROVE:
         return CNTX_MODE_MANUAL_APPROVE;
     case CNTX_MODE_MANUAL_APPROVE:
+        return CNTX_MODE_PLAN;
+    case CNTX_MODE_PLAN:
         return CNTX_MODE_AUTO_APPROVE;
-    /* Legacy extra modes cycle back to the canonical default. */
     case CNTX_MODE_COUNSEL:
     case CNTX_MODE_FILE_ONLY:
     default:

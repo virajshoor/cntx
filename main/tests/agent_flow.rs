@@ -172,6 +172,10 @@ fn plain_goal_context(session_id: Option<String>) -> ToolLoopPromptContext {
         effort: Effort::Medium,
         goal: None,
         session_id,
+        cacheable_project: None,
+        mcp_tools: Vec::new(),
+        artifacts_dir: None,
+        mcp_servers: Vec::new(),
     }
 }
 
@@ -468,6 +472,7 @@ fn mock_runtime(root: &std::path::Path, endpoint: EndpointConfig) -> Runtime {
             dry_run: false,
             sandbox: Sandbox::new(Mode::Allow, root.to_path_buf(), Vec::new()),
             tool_use: true,
+            jsonl: false,
         },
     )
     .unwrap()
@@ -753,9 +758,11 @@ fn go_protocols_route_correctly_with_auth_and_session_headers() {
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: "hi".to_string(),
+            cacheable: false,
         }],
         max_tokens: Some(64),
         session_id: Some("go-session-1".to_string()),
+        tools: Vec::new(),
     };
     let text = stream_once(chat.endpoint(), request, true);
     assert_eq!(text, "chat ok");
@@ -778,9 +785,11 @@ fn go_protocols_route_correctly_with_auth_and_session_headers() {
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: "hi".to_string(),
+            cacheable: false,
         }],
         max_tokens: Some(64),
         session_id: Some("go-session-2".to_string()),
+        tools: Vec::new(),
     };
     let text = stream_once(messages.endpoint(), request, true);
     assert_eq!(text, "messages ok");
@@ -803,9 +812,11 @@ fn go_protocols_route_correctly_with_auth_and_session_headers() {
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: "hi".to_string(),
+            cacheable: false,
         }],
         max_tokens: Some(64),
         session_id: Some("go-session-3".to_string()),
+        tools: Vec::new(),
     };
     let text = stream_once(responses.endpoint(), request, true);
     assert_eq!(text, "responses ok");
@@ -858,4 +869,204 @@ fn stream_once(endpoint: EndpointConfig, request: ChatRequest, go: bool) -> Stri
             .unwrap();
         text
     })
+}
+
+#[test]
+fn tool_loop_sends_native_tools_array() {
+    let server = MockServer::new(vec![sse("done")]);
+    let (_guard, root) = workspace();
+    let mut host = TestHost::default();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(cntx::tools::run_tool_loop(
+            "noop",
+            &Sandbox::new(Mode::Allow, root.clone(), Vec::new()),
+            &root,
+            &server.endpoint(),
+            "mock-model",
+            plain_goal_context(None),
+            &mut host,
+        ))
+        .unwrap();
+    let body = server.request(0);
+    assert!(
+        body.contains("\"tools\"") && body.contains("\"name\":\"read\""),
+        "expected native tools[] in request: {body}"
+    );
+    assert!(
+        !body.contains("\"parameters\"") || body.contains("\"type\":\"function\""),
+        "openai-style tool entries expected"
+    );
+}
+
+#[test]
+fn large_bash_output_is_packed_across_iterations() {
+    let cmd = r#"{"command":"python3 gen_big.py","description":"emit large stdout"}"#;
+    let server = MockServer::new(vec![
+        sse(&tool_call_text("bash", cmd)),
+        sse(&tool_call_text("bash", cmd)),
+        sse(&tool_call_text("bash", cmd)),
+        sse(&tool_call_text("bash", cmd)),
+        sse(&tool_call_text("bash", cmd)),
+        sse(&tool_call_text("bash", cmd)),
+        sse("done packing"),
+    ]);
+    let (_guard, root) = workspace();
+    std::fs::write(
+        root.join("gen_big.py"),
+        "print('LINE'*50)\nfor i in range(150):\n    print(i)\n",
+    )
+    .unwrap();
+    let artifacts = root.join("arts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let mut host = TestHost::default();
+    let mut ctx = plain_goal_context(None);
+    ctx.artifacts_dir = Some(artifacts);
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(cntx::tools::run_tool_loop(
+            "emit large bash six times",
+            &Sandbox::new(Mode::Allow, root.clone(), Vec::new()),
+            &root,
+            &server.endpoint(),
+            "mock-model",
+            ctx,
+            &mut host,
+        ))
+        .unwrap();
+    let last = server.request(6);
+    assert!(
+        last.contains("[packed") || last.contains("sha256="),
+        "{last}"
+    );
+    assert!(
+        last.len() < 200_000,
+        "prompt grew too large: {} bytes",
+        last.len()
+    );
+}
+
+#[test]
+fn mock_mcp_tool_is_callable_and_packed() {
+    let (_guard, root) = workspace();
+    let script = root.join("mock_mcp.py");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+def reply(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    mid = req.get("id")
+    method = req.get("method")
+    if method == "initialize":
+        reply({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"0"}}})
+    elif method == "tools/list":
+        reply({"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}})
+    elif method == "tools/call":
+        text = (req.get("params") or {}).get("arguments", {}).get("text", "")
+        reply({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text": text * 200}]}})
+    elif method == "shutdown":
+        reply({"jsonrpc":"2.0","id":mid,"result":{}})
+        break
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    let server_cfg = cntx::config::McpServerConfig {
+        name: "mock".into(),
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into()],
+        env: Default::default(),
+        enabled: true,
+        url: None,
+        built_in: false,
+        description: Some("mock".into()),
+    };
+    let mock = MockServer::new(vec![
+        sse(&tool_call_text("mcp__mock__echo", r#"{"text":"pad-"}"#)),
+        sse("mcp done"),
+    ]);
+    let mut host = TestHost::default();
+    let mut ctx = plain_goal_context(None);
+    ctx.mcp_servers = vec![server_cfg.clone()];
+    ctx.mcp_tools = vec![cntx::providers::ToolSpec {
+        name: "mcp__mock__echo".into(),
+        description: "echo".into(),
+        input_schema: serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}}),
+    }];
+    ctx.artifacts_dir = Some(root.join("mcp-arts"));
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(cntx::tools::run_tool_loop(
+            "call mcp",
+            &Sandbox::new(Mode::Allow, root.clone(), Vec::new()),
+            &root,
+            &mock.endpoint(),
+            "mock-model",
+            ctx,
+            &mut host,
+        ))
+        .unwrap();
+    let second = mock.request(1);
+    assert!(
+        second.contains("Tool result for 'mcp__mock__echo'"),
+        "{second}"
+    );
+    assert!(
+        second.contains("sha256=") || second.contains("pad-"),
+        "{second}"
+    );
+}
+
+#[test]
+fn history_turns_bounds_session_history() {
+    let mut session = cntx::sessions::Session::new("t");
+    for i in 0..20 {
+        session.push("user", format!("u{i}"));
+        session.push("assistant", format!("a{i}"));
+    }
+    let hist = cntx::context::session_history(&session, 2);
+    let users: Vec<_> = hist.iter().filter(|m| m.role == "user").collect();
+    assert!(users.len() <= 2, "got {} user turns", users.len());
+    assert!(hist
+        .iter()
+        .any(|m| m.content.contains("u18") || m.content.contains("u19")));
+}
+
+#[test]
+fn outline_context_avoids_raw_excerpts_for_search() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "// header\npub fn check_auth() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "mod auth;\n").unwrap();
+    let input = cntx::context::build_prompt_input("where is check_auth defined?", root);
+    assert!(
+        input.text.contains("outline") || input.text.contains("Symbol span"),
+        "{}",
+        input.text
+    );
+    assert!(input.text.contains("pub fn check_auth"), "{}", input.text);
+    // Auto context should stay outline-sized, not dump long bodies.
+    assert!(
+        input.text.len() < 2_000,
+        "context too large: {}",
+        input.text.len()
+    );
 }
